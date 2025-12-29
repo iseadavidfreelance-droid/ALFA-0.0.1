@@ -1,0 +1,7 @@
+{
+  "name": "Central de Inteligencia Alfa 0.0.1",
+  "description": "Terminal de inteligencia táctica para el arbitraje de atención y gestión de activos creativos perpetuos.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
