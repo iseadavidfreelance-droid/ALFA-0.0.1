@@ -14,14 +14,12 @@ import {
   MarketTier
 } from './types';
 import { 
-  INITIAL_DESTINATIONS, 
-  COMMAND_HELP 
+  INITIAL_DESTINATIONS
 } from './constants';
 import { 
   calculateRarityByPercentile, 
   runIncubationEngine, 
   runLeakHunter,
-  runLinkHealthCheck,
   calculateAssetScore
 } from './services/logicEngines';
 import CLI from './components/CLI';
@@ -31,13 +29,13 @@ import EntityDetailModal from './components/EntityDetailModal';
 import CreateAssetModal from './components/CreateAssetModal';
 import CreateArtistModal from './components/CreateArtistModal';
 import { GoogleGenAI } from "@google/genai";
-import { supabase } from './services/supabaseClient'; // CONEXIÓN REAL
+import { supabase } from './services/supabaseClient';
 
 const App: React.FC = () => {
   // ESTADO DB: Ahora inicia vacío, esperando a Supabase
   const [assets, setAssets] = useState<Asset[]>([]); 
   const [artists, setArtists] = useState<Artist[]>([]);
-  const [destinations, setDestinations] = useState<AssetDestination[]>(INITIAL_DESTINATIONS); // Destinos aún pueden ser locales temporalmente si no hay tabla
+  const [destinations, setDestinations] = useState<AssetDestination[]>(INITIAL_DESTINATIONS); 
   
   // UI State
   const [missions, setMissions] = useState<Mission[]>([]);
@@ -62,170 +60,135 @@ const App: React.FC = () => {
   const [invSearch, setInvSearch] = useState('');
   const [invSort, setInvSort] = useState<'SCORE' | 'OUTBOUND' | 'YIELD'>('SCORE');
   const [invRarityFilter, setInvRarityFilter] = useState<string>('ALL');
+  
+  // LOGS CON HISTORIAL
   const [terminalLog, setTerminalLog] = useState<string[]>(['ALFA_OS v0.0.1 SYSTEM_BOOT...', 'CONECTANDO A CEREBRO SUPABASE...']);
 
-  // Función log optimizada para historial estático
   const log = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
     const logEntry = `<span class="opacity-50 mr-2">[${timestamp}]</span> ${msg}`;
     setTerminalLog(prev => [...prev.slice(-100), logEntry]);
   };
-  
 
-  // --- CARGA INICIAL DE DATOS (READ) ---
+  // [NUEVO] Listener Global del Sistema de Radio
   useEffect(() => {
-    const fetchDatabase = async () => {
-      try {
-        // 1. Cargar Assets
-        const { data: dbAssets, error: assetError } = await supabase.from('assets').select('*');
-        if (assetError) throw assetError;
-        
-        if (dbAssets) {
-          // Mapeo inverso: DB JSON -> App Array
-          const mappedAssets: Asset[] = dbAssets.map((row: any) => ({
-             ...row,
-             // Recuperamos el array de pines del JSONB
-             pins: row.metrics_json?.pins || []
-           }));
-           setAssets(mappedAssets);
-        }
+    const handleSystemLog = (e: any) => {
+      const { message, type } = e.detail;
+      
+      let style = 'text-white';
+      if (type === 'SUCCESS') style = 'text-[#00ff41] font-bold'; 
+      if (type === 'WARNING') style = 'text-yellow-500';
+      if (type === 'ERROR') style = 'text-red-500 font-black bg-red-900/20';
+      if (type === 'SYSTEM') style = 'text-blue-400 italic';
 
-        // 2. Cargar Artistas
-        const { data: dbArtists, error: artistError } = await supabase.from('artists').select('*');
-        if (artistError) throw artistError;
-        if (dbArtists) setArtists(dbArtists);
-
-        // [NUEVO] 3. Cargar Misiones Pendientes
-        const { data: dbMissions } = await supabase.from('missions').select('*').eq('status', 'OPEN');
-        if (dbMissions) setMissions(dbMissions);
-
-        // [NUEVO] 4. Cargar Transacciones y Recalcular Saldo
-        const { data: dbTrans } = await supabase.from('transactions').select('*');
-        if (dbTrans) {
-            setTransactions(dbTrans);
-            // Recalcular saldo basado en historial real
-            const totalC = dbTrans.reduce((acc, t) => acc + (t.credits_delta || 0), 40); // 40 base
-            setGlobalCredits(totalC);
-            const totalY = dbTrans.reduce((acc, t) => acc + (t.source_type === 'CAPITAL_INJECTION' ? (t.amount || 0) : 0), 0);
-            setTotalYield(totalY);
-        }
-
-        log(`<span class="text-green-400">SINCRONIZACIÓN TOTAL: ASSETS, MISIONES Y LEDGER CARGADOS.</span>`);
-
-      } catch (err: any) {
-        console.error("Error DB:", err);
-        log(`<span class="text-red-500">FALLO DE CONEXIÓN BD: ${err.message}</span>`);
-      }
+      log(`<span class="${style}">${message}</span>`);
     };
 
+    window.addEventListener('ALFA_LOG_EVENT', handleSystemLog);
+    return () => window.removeEventListener('ALFA_LOG_EVENT', handleSystemLog);
+  }, []);
+
+  // --- CARGA INICIAL DE DATOS (READ) ---
+  const fetchDatabase = async () => {
+    try {
+      const { data: dbAssets, error: assetError } = await supabase.from('assets').select('*');
+      if (assetError) throw assetError;
+      
+      if (dbAssets) {
+        const mappedAssets: Asset[] = dbAssets.map((row: any) => ({
+           ...row,
+           pins: row.metrics_json?.pins || []
+         }));
+         setAssets(mappedAssets);
+      }
+
+      const { data: dbArtists } = await supabase.from('artists').select('*');
+      if (dbArtists) setArtists(dbArtists);
+
+      const { data: dbMissions } = await supabase.from('missions').select('*').eq('status', 'OPEN');
+      if (dbMissions) setMissions(dbMissions);
+
+      const { data: dbTrans } = await supabase.from('transactions').select('*');
+      if (dbTrans) {
+          setTransactions(dbTrans);
+          const totalC = dbTrans.reduce((acc, t) => acc + (t.credits_delta || 0), 40); 
+          setGlobalCredits(totalC);
+          const totalY = dbTrans.reduce((acc, t) => acc + (t.source_type === 'CAPITAL_INJECTION' ? (t.amount || 0) : 0), 0);
+          setTotalYield(totalY);
+      }
+      log(`<span class="text-green-400">SINCRONIZACIÓN TOTAL: ASSETS, MISIONES Y LEDGER CARGADOS.</span>`);
+    } catch (err: any) {
+      console.error("Error DB:", err);
+      log(`<span class="text-red-500">FALLO DE CONEXIÓN BD: ${err.message}</span>`);
+    }
+  };
+
+  useEffect(() => {
     fetchDatabase();
-    
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
 
   // --- MANEJADORES DE ESCRITURA (WRITE) ---
-
-  // Crear Asset
   const handleCreateAsset = async (newAsset: Asset) => {
-    // 1. Optimistic Update (UI inmediata)
     setAssets(prev => [...prev, newAsset]);
     
-    // 2. Persistencia en DB
-    // Mapeo: Extraemos 'pins' para guardarlo en metrics_json
     const { pins, ...rest } = newAsset;
     const dbPayload = {
       ...rest,
-      metrics_json: { pins: pins } // Guardamos array de pines como JSON
+      metrics_json: { pins: pins } 
     };
 
     const { error } = await supabase.from('assets').insert(dbPayload);
-    if (error) {
-      log(`<span class="text-red-500">ERROR GUARDANDO ASSET: ${error.message}</span>`);
-    } else {
+    if (!error) {
       log(`<span class="text-green-400">ASSET ${newAsset.sku_id} REGISTRADO EN NUBE.</span>`);
-      
-      // [NUEVO] Si se creó desde un huérfano, limpiar la lista y cerrar misión
       if (newAsset.pins.length > 0) {
           const pinId = newAsset.pins[0].pin_id;
-          // Limpiar estado volátil
           setOrphans(prev => prev.filter(o => o.id !== pinId));
-          
-          // Buscar misión persistente asociada
           const missionId = `ORPHAN-${pinId}`;
           const mission = missions.find(m => m.id === missionId);
           if (mission) {
                await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', mission.id);
                setMissions(prev => prev.map(m => m.id === mission.id ? {...m, status: 'RESOLVED'} : m));
-               log(`<span class="text-blue-400">MISIÓN ${missionId} CERRADA AUTOMÁTICAMENTE.</span>`);
           }
       }
     }
-    
     setIsCreateAssetModalOpen(false);
   };
 
-  // Crear Artista
   const handleCreateArtist = async (newArtist: Artist) => {
     setArtists(prev => [...prev, newArtist]);
-    
     const { error } = await supabase.from('artists').insert(newArtist);
-    if (error) {
-       log(`<span class="text-red-500">ERROR GUARDANDO ENTIDAD: ${error.message}</span>`);
-    } else {
-       log(`<span class="text-purple-400">ENTIDAD ${newArtist.name} INMORTALIZADA EN DB.</span>`);
-    }
-    
+    if (!error) log(`<span class="text-purple-400">ENTIDAD ${newArtist.name} INMORTALIZADA EN DB.</span>`);
     setIsCreateArtistModalOpen(false);
   };
 
-  // Actualizar Asset (Al editar en modal)
   const handleUpdateAsset = async (sku: string, updates: Partial<Asset>, newDestinations?: AssetDestination[]) => {
-    // 1. Update Local
-    setAssets(prev => prev.map(a => {
-        if (a.sku_id === sku) {
-            return { ...a, ...updates };
-        }
-        return a;
-    }));
+    setAssets(prev => prev.map(a => a.sku_id === sku ? { ...a, ...updates } : a));
     
     if (newDestinations) {
         setDestinations(prev => [...prev.filter(x => x.asset_sku !== sku), ...newDestinations]);
     }
 
-    // 2. Persistencia DB
-    // Si la actualización incluye 'pins', debemos empaquetarlo en metrics_json
     const dbUpdates: any = { ...updates };
-    
     if (updates.pins) {
       dbUpdates.metrics_json = { pins: updates.pins };
-      delete dbUpdates.pins; // 'pins' no es columna directa en DB
+      delete dbUpdates.pins; 
     }
-
-    const { error } = await supabase.from('assets').update(dbUpdates).eq('sku_id', sku);
-    
-    if (error) {
-       log(`<span class="text-red-500">ERROR SINCRONIZANDO CAMBIOS: ${error.message}</span>`);
-    } else {
-       log(`<span class="text-blue-400">CAMBIOS EN ${sku} CONFIRMADOS.</span>`);
-    }
+    await supabase.from('assets').update(dbUpdates).eq('sku_id', sku);
+    log(`<span class="text-blue-400">CAMBIOS EN ${sku} CONFIRMADOS.</span>`);
   };
 
-
-  // --- RESTO DEL CÓDIGO (COMANDOS, LÓGICA) ---
   const executeCommand = async (rawCmd: string) => {
     const cleanCmd = rawCmd.trim();
     if (!cleanCmd) return;
 
-    // [INSERCIÓN 2: INTERCEPTOR DE COMANDO TOKEN]
     if (cleanCmd.startsWith('token ')) {
         const newToken = cleanCmd.split(' ')[1];
         if (newToken) {
             localStorage.setItem('ALFA_PINTEREST_TOKEN', newToken);
             log('<span class="text-green-400 font-bold">LLAVE DE ACCESO (TOKEN) ACTUALIZADA EN BÓVEDA LOCAL.</span>');
             setShowTokenModal(false);
-        } else {
-            log('<span class="text-red-500">ERROR: SINTAXIS INCORRECTA. USA: token [TU_CLAVE]</span>');
         }
         return;
     }
@@ -241,19 +204,9 @@ const App: React.FC = () => {
           const creds = Math.floor(usd / 2);
           setGlobalCredits(p => p + creds);
           setTotalYield(p => p + usd);
-          
-          // [DB] Guardar Transacción
-          const newTx: Transaction = { 
-              trans_id: `TX-${Date.now()}`, 
-              amount: usd, 
-              source_type: 'CAPITAL_INJECTION', 
-              related_id: 'POOL', 
-              date: Date.now(), 
-              credits_delta: creds 
-          };
+          const newTx: Transaction = { trans_id: `TX-${Date.now()}`, amount: usd, source_type: 'CAPITAL_INJECTION', related_id: 'POOL', date: Date.now(), credits_delta: creds };
           setTransactions(p => [...p, newTx]);
-          
-          await supabase.from('transactions').insert(newTx); // GUARDADO REAL
+          await supabase.from('transactions').insert(newTx); 
           log(`<span class="text-green-400">INYECCIÓN CAPITAL: +$${usd} AL YIELD. GUARDADO EN LEDGER.</span>`);
         }
         break;
@@ -262,19 +215,9 @@ const App: React.FC = () => {
         const n = parseInt(parts[1]);
         if (!isNaN(n)) {
           setGlobalCredits(p => Math.max(0, p - n));
-          
-          // [DB] Guardar Transacción
-          const newTx: Transaction = { 
-              trans_id: `TX-${Date.now()}`, 
-              amount: 0, 
-              source_type: 'CREDIT_CONSUMPTION', 
-              related_id: 'ENTREGA', 
-              date: Date.now(), 
-              credits_delta: -n 
-          };
+          const newTx: Transaction = { trans_id: `TX-${Date.now()}`, amount: 0, source_type: 'CREDIT_CONSUMPTION', related_id: 'ENTREGA', date: Date.now(), credits_delta: -n };
           setTransactions(p => [...p, newTx]);
-          
-          await supabase.from('transactions').insert(newTx); // GUARDADO REAL
+          await supabase.from('transactions').insert(newTx); 
           log(`<span class="text-red-400">CRÉDITOS CONSUMIDOS POR ENTREGA: -${n}. REGISTRADO.</span>`);
         }
         break;
@@ -282,8 +225,6 @@ const App: React.FC = () => {
       case 'verificar':
         const target = parts[1]?.toUpperCase();
         setMissions(prev => prev.map(m => m.asset_sku === target ? { ...m, status: 'RESOLVED' } : m));
-        
-        // [DB] Actualizar estado de misión
         const missionToClose = missions.find(m => m.asset_sku === target && m.status === 'OPEN');
         if (missionToClose) {
             await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', missionToClose.id);
@@ -296,7 +237,11 @@ const App: React.FC = () => {
         const sku = parts[1]?.toUpperCase();
         log(`<span class="text-purple-400">IA_KERNEL ANALIZANDO SKU ${sku}...</span>`);
         try {
-          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          // Usa la variable de entorno de Vite
+          const apiKey = process.env.GEMINI_API_KEY; 
+          if (!apiKey) throw new Error("API Key no configurada");
+          
+          const ai = new GoogleGenAI({ apiKey });
           const response = await ai.models.generateContent({
             model: 'gemini-2.0-flash', 
             contents: `Analiza este SKU de diseño: ${sku}. Sugiere optimización de rentabilidad.`,
@@ -309,39 +254,32 @@ const App: React.FC = () => {
       case 'ciclo':
         runDailyCycle();
         break;
-
+        
       default: log('COMANDO_NO_RECONOCIDO. ESCRIBE "AYUDA".');
     }
   };
 
   const runDailyCycle = useCallback(async () => {
-    log(`<span class="text-yellow-500 font-bold">[CICLO] INICIANDO SECUENCIA DE SINCRONIZACIÓN REAL...</span>`);
-    
     try {
-        // 1. Obtener Datos Reales de Pinterest
+        // 1. Logs de inicio (Sistema de Radio ya emite logs desde servicios)
+        
+        // 2. Obtener Datos Reales de Pinterest
         const realPins = await pinterestService.fetchAllPins();
-        log(`<span class="text-blue-400">PINTEREST: ${realPins.length} PINES DESCARGADOS.</span>`);
-
-        // 2. Ejecutar Motor de Integridad (Realidad vs BD)
-        // runIntegrityCheck ahora devuelve 'orphans'
+        
+        // 3. Ejecutar Motor de Integridad
         const integrityResult = runIntegrityCheck(assets, realPins);
         
-        // [NUEVO] Actualizar estado de huérfanos para la UI
+        // Actualizar Orphans UI inmediatamente
         setOrphans(integrityResult.orphans);
 
-        // 3. Actualizar Assets con métricas reales
-        const updatedAssets = assets.map(a => {
+        // 4. Actualizar Assets con métricas reales
+        let processedAssets = assets.map(a => {
             const newMetrics = integrityResult.mappedPins.get(a.sku_id);
-            if (newMetrics) {
-                return { ...a, pins: newMetrics };
-            }
-            return a;
+            return newMetrics ? { ...a, pins: newMetrics } : a;
         });
 
-        // 4. Agregar las misiones de huérfanos detectadas
+        // 5. Persistencia de Misiones (Integridad)
         const newMissions = integrityResult.missions;
-        
-        // [DB] Guardar Misiones Nuevas (Bulk Upsert)
         if (newMissions.length > 0) {
             const { error } = await supabase.from('missions').upsert(newMissions);
             if (error) console.error("Error DB Misiones:", error);
@@ -350,20 +288,37 @@ const App: React.FC = () => {
             log(`<span class="text-green-500">INTEGRIDAD DE RED: 100% (Sin nuevos huérfanos).</span>`);
         }
 
-        // 5. Ejecutar resto de motores lógicos sobre los datos reales
-        const maturedAssets = runIncubationEngine(updatedAssets);
-        const finalAssets = calculateRarityByPercentile(maturedAssets);
+        // 6. Motores Lógicos (Incubación -> Rareza -> Fugas)
+        const maturedAssets = runIncubationEngine(processedAssets);
+        const finalAssets = calculateRarityByPercentile(maturedAssets, destinations);
         const leakMissions = runLeakHunter(finalAssets, destinations);
 
-        // Guardar misiones de fuga también
+        // 7. Persistencia de Fugas
         if (leakMissions.length > 0) {
              await supabase.from('missions').upsert(leakMissions);
         }
 
-        // Actualizar Estado
+        // 8. [SNAPSHOTS] Historial de Métricas (La Memoria)
+        const timestamp = Date.now();
+        const snapshots = finalAssets.map(a => {
+            const revenue = destinations.find(d => d.asset_sku === a.sku_id)?.revenue_generated || 0;
+            return {
+                snapshot_id: `SNAP-${timestamp}-${a.sku_id}`,
+                asset_sku: a.sku_id,
+                timestamp: timestamp,
+                total_score: calculateAssetScore(a.pins, revenue),
+                total_revenue: revenue,
+                rarity_at_moment: a.current_rarity
+            };
+        });
+        
+        // TODO: Descomentar cuando exista la tabla 'metrics_history'
+        // await supabase.from('metrics_history').insert(snapshots); 
+        log(`<span class="text-yellow-500">HISTORIAL: ${snapshots.length} puntos de datos procesados.</span>`);
+
+        // 9. Actualización de Estado Final
         setAssets(finalAssets);
         setMissions(prev => {
-            // Unificar misiones nuevas evitando duplicados por ID
             const currentIds = new Set(prev.map(m => m.id));
             const uniqueNew = [...newMissions, ...leakMissions].filter(m => !currentIds.has(m.id));
             return [...prev, ...uniqueNew];
@@ -372,17 +327,17 @@ const App: React.FC = () => {
         log(`<span class="text-green-500 font-bold">[OK] SINCRONIZACIÓN COMPLETADA. TABLERO ACTUALIZADO.</span>`);
 
     } catch (error: any) {
-        console.error(error);
-        // [INSERCIÓN 3: CAPTURA INTELIGENTE DE ERROR 401]
         if (error.message === 'TOKEN_EXPIRED') {
             log(`<span class="text-red-600 font-black bg-red-900/20 blink">!!! ALERTA: CREDENCIAL PINTEREST CADUCADA !!!</span>`);
-            setShowTokenModal(true); // Despliega la ventana de crisis
+            setShowTokenModal(true);
         } else {
+            console.error(error);
             log(`<span class="text-red-500">FALLO CRÍTICO EN CICLO: ${error.message}</span>`);
         }
     }
   }, [assets, destinations]);
 
+  // --- RENDERS ---
   const filteredInventory = useMemo(() => {
     let list = [...assets];
     if (invSearch) {
@@ -405,20 +360,33 @@ const App: React.FC = () => {
     return list;
   }, [assets, invSearch, invSort, invRarityFilter, destinations]);
 
-  const selectedAsset = useMemo(() => 
-    assets.find(a => a.sku_id === selectedAssetSku) || null,
-  [assets, selectedAssetSku]);
+  const selectedAsset = useMemo(() => assets.find(a => a.sku_id === selectedAssetSku) || null, [assets, selectedAssetSku]);
 
-  // [NUEVO] Filtro para la Tabla de Auditoría: Leemos de 'missions' (persistente)
-  const auditOrphanList = useMemo(() => 
-    missions.filter(m => m.type === 'UNMAPPED_RESOURCE' && m.status === 'OPEN').sort((a,b) => b.created_at - a.created_at), 
-  [missions]);
+  // LISTA DE AUDITORÍA PERSISTENTE
+  const auditOrphanList = useMemo(() => {
+      // Usamos 'missions' que vienen de DB, no 'orphans' volátil
+      return missions
+        .filter(m => m.type === 'UNMAPPED_RESOURCE' && m.status === 'OPEN')
+        // Ordenar por prioridad (HIGH antes que MEDIUM)
+        .sort((a,b) => (a.priority === 'HIGH' ? -1 : 1));
+  }, [missions]);
+
+  // HELPER PARA PARSEAR EVIDENCIA DE DB
+  const parseEvidence = (evidence: string[]) => {
+      const stats = { imp: 0, save: 0, out: 0, score: 0 };
+      if (!evidence) return stats;
+      evidence.forEach(s => {
+          if (s.startsWith('SCORE:')) stats.score = parseInt(s.split(':')[1]) || 0;
+          if (s.startsWith('IMP:')) stats.imp = parseInt(s.split(':')[1]) || 0;
+          if (s.startsWith('SAVE:')) stats.save = parseInt(s.split(':')[1]) || 0;
+          if (s.startsWith('OUT:')) stats.out = parseInt(s.split(':')[1]) || 0;
+      });
+      return stats;
+  };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-[#00ff41] font-mono flex flex-col p-4 gap-4 crt-flicker selection:bg-[#00ff41] selection:text-black relative">
-      
-      {/* HEADER */}
-      <header className="flex flex-col md:flex-row justify-between items-center border-b border-[#00ff41]/40 bg-[#00ff41]/5 p-4 gap-4 relative overflow-hidden">
+    <div className="min-h-screen bg-[#050505] text-[#00ff41] font-mono flex flex-col p-4 gap-4 relative overflow-hidden">
+      <header className="flex flex-col md:flex-row justify-between items-center border-b border-[#00ff41]/40 bg-[#00ff41]/5 p-4 gap-4">
         <div className="flex gap-8 items-center">
           <div className="flex flex-col">
             <span className="text-2xl font-black italic tracking-tighter">ALFA_OS <span className="text-[9px] bg-[#00ff41] text-black px-1 not-italic ml-2">v0.0.1</span></span>
@@ -432,7 +400,6 @@ const App: React.FC = () => {
             <div className="flex flex-col"><span className="text-[7px] opacity-40 uppercase font-black">POOL_CREDS</span><span className={`text-xs font-black ${globalCredits === 0 ? 'text-red-500 animate-pulse' : 'text-blue-400'}`}>{globalCredits}</span></div>
           </div>
         </div>
-
         <nav className="flex gap-1 bg-black/60 p-1 border border-[#00ff41]/20">
           {(['PANEL', 'INVENTARIO', 'ARTISTAS', 'FINANZAS', 'AUDITORIA'] as const).map(tab => (
             <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-1 text-[9px] font-black border ${activeTab === tab ? 'bg-[#00ff41] text-black border-[#00ff41]' : 'border-transparent opacity-40'} uppercase transition-all`}>
@@ -440,46 +407,16 @@ const App: React.FC = () => {
             </button>
           ))}
         </nav>
-
         <div className="flex gap-8 border-l border-[#00ff41]/20 pl-8">
           <div className="flex flex-col items-end"><span className="text-[7px] opacity-40 uppercase font-black">Yield_Global</span><span className="text-xl font-black text-yellow-500">${totalYield.toFixed(0)}</span></div>
         </div>
       </header>
 
-      {/* VIEWPORT */}
       <main className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 overflow-hidden">
         <section className="lg:col-span-9 flex flex-col border border-[#00ff41]/20 bg-black/40 overflow-hidden relative">
           
           {activeTab === 'PANEL' && (
-            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10 animate-in fade-in">
-              {/* Contenido del Panel se mantiene igual visualmente */}
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-10">
-                <div className="space-y-4">
-                  <h3 className="text-xs font-black uppercase italic border-l-4 border-[#00ff41] pl-3 py-1 bg-[#00ff41]/5">Vectores_Elite_Assets</h3>
-                  <div className="grid grid-cols-1 gap-2">
-                    {assets.sort((a,b)=>calculateAssetScore(b.pins)-calculateAssetScore(a.pins)).slice(0,5).map((a, i) => (
-                      <div key={a.sku_id} className="bg-white/5 border-l border-[#00ff41]/30 p-3 flex justify-between items-center cursor-pointer hover:bg-[#00ff41]/10 transition-all" onClick={() => setSelectedAssetSku(a.sku_id)}>
-                        <span className="text-[10px] font-black">{i+1}. {a.sku_id}</span>
-                        <div className="flex gap-4 items-center">
-                          <span className="text-[10px] text-pink-500 font-bold">{a.pins.reduce((acc,p)=>acc+p.outbound_clicks,0)} CLKS</span>
-                          <span className="text-[10px] text-yellow-500 font-black">{calculateAssetScore(a.pins).toFixed(0)} PTS</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-4">
-                  <h3 className="text-xs font-black uppercase italic border-l-4 border-purple-500 pl-3 py-1 bg-purple-500/5">Entidades_Board_Attention</h3>
-                  <div className="grid grid-cols-1 gap-2">
-                    {artists.slice(0,5).map((art, i) => (
-                      <div key={art.artist_id} className="bg-white/5 border-l border-purple-400/30 p-3 flex justify-between items-center cursor-pointer hover:bg-purple-500/10" onClick={() => setSelectedArtistId(art.artist_id)}>
-                        <span className="text-[10px] font-black">{i+1}. {art.name}</span>
-                        <span className="text-[8px] opacity-40 uppercase font-black">{art.market_tier}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
+            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
               <div className="grid grid-cols-3 gap-6">
                 <div className="bg-white/5 border border-white/10 p-4"><div className="text-[8px] opacity-40 font-black uppercase">Misiones_Abiertas</div><div className="text-2xl font-black text-red-500">{missions.filter(m=>m.status==='OPEN').length}</div></div>
                 <div className="bg-white/5 border border-white/10 p-4"><div className="text-[8px] opacity-40 font-black uppercase">Legendaries</div><div className="text-2xl font-black text-yellow-500">{assets.filter(a=>a.current_rarity===Rarity.LEGENDARY).length}</div></div>
@@ -495,163 +432,114 @@ const App: React.FC = () => {
           {activeTab === 'INVENTARIO' && (
             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
               <div className="flex justify-between items-center border-b border-[#00ff41]/20 pb-4">
-                 <h2 className="text-xl font-black uppercase italic tracking-tighter">Archivo_Maestro_Archivo_Digital</h2>
-                 <div className="flex gap-2">
-                    <button onClick={() => setIsCreateAssetModalOpen(true)} className="bg-[#00ff41] text-black text-[9px] font-black px-4 py-1 uppercase italic hover:bg-white transition-all mr-4 shadow-[0_0_15px_rgba(0,255,65,0.4)]">
-                        + Nuevo_Asset
-                    </button>
-
-                    <input type="text" placeholder="BUSCAR SKU/NOMBRE..." className="bg-black border border-[#00ff41]/40 px-3 py-1 text-[10px] w-48" value={invSearch} onChange={e=>setInvSearch(e.target.value)} />
-                    <select className="bg-black border border-[#00ff41]/40 px-3 py-1 text-[10px]" onChange={e=>setInvSort(e.target.value as any)}>
-                      <option value="SCORE">SCORE</option>
-                      <option value="OUTBOUND">OUTBOUND</option>
-                      <option value="YIELD">YIELD</option>
-                    </select>
-                    <select className="bg-black border border-[#00ff41]/40 px-3 py-1 text-[10px]" onChange={e=>setInvRarityFilter(e.target.value)}>
-                      <option value="ALL">TODAS_RARIDADES</option>
-                      {Object.values(Rarity).map(r=><option key={r} value={r}>{r}</option>)}
-                    </select>
-                 </div>
+                 <h2 className="text-xl font-black uppercase italic tracking-tighter">Archivo_Maestro</h2>
+                 <button onClick={() => setIsCreateAssetModalOpen(true)} className="bg-[#00ff41] text-black text-[9px] font-black px-4 py-1 uppercase italic hover:bg-white transition-all">+ Nuevo_Asset</button>
               </div>
               <div className="flex-1 overflow-y-auto">
                 <table className="w-full text-left text-[10px] uppercase border-collapse">
                   <thead className="opacity-40 sticky top-0 bg-[#050505] z-10">
-                    <tr><th className="p-2 border-b border-white/5">SKU</th><th className="p-2 border-b border-white/5">Display_Name</th><th className="p-2 border-b border-white/5">Score</th><th className="p-2 border-b border-white/5">Outbound</th><th className="p-2 border-b border-white/5">Yield</th><th className="p-2 border-b border-white/5">LIFECYCLE</th></tr>
+                    <tr><th className="p-2">SKU</th><th className="p-2">Name</th><th className="p-2">Score</th><th className="p-2">Outbound</th><th className="p-2">LIFECYCLE</th></tr>
                   </thead>
                   <tbody>
                     {filteredInventory.map(a => (
-                      <tr key={a.sku_id} className="hover:bg-[#00ff41]/10 cursor-pointer transition-all border-b border-white/5" onClick={() => setSelectedAssetSku(a.sku_id)}>
+                      <tr key={a.sku_id} className="hover:bg-[#00ff41]/10 cursor-pointer border-b border-white/5" onClick={() => setSelectedAssetSku(a.sku_id)}>
                         <td className="p-2 font-black text-[#00ff41]">{a.sku_id}</td>
-                        <td className="p-2 opacity-80 font-bold">{a.display_name}</td>
+                        <td className="p-2 opacity-80">{a.display_name}</td>
                         <td className="p-2 text-yellow-500 font-black">{calculateAssetScore(a.pins).toFixed(0)}</td>
                         <td className="p-2 text-pink-500 font-bold">{a.pins.reduce((acc,p)=>acc+p.outbound_clicks,0)}</td>
-                        <td className="p-2 text-green-400 font-black">${destinations.filter(d=>d.asset_sku===a.sku_id).reduce((x,y)=>x+y.revenue_generated,0).toFixed(0)}</td>
                         <td className="p-2"><span className="text-[8px] bg-white/10 px-1 font-bold">{a.lifecycle_stage}</span></td>
                       </tr>
                     ))}
-                    {filteredInventory.length === 0 && (
-                        <tr><td colSpan={6} className="text-center py-10 opacity-30 italic">BASE DE DATOS VACÍA. INICIE SECUENCIA DE SIEMBRA.</td></tr>
-                    )}
                   </tbody>
                 </table>
               </div>
             </div>
           )}
-
+          
           {activeTab === 'ARTISTAS' && (
-            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
-              <div className="flex justify-between items-center border-b border-purple-500/20 pb-4">
-                <h2 className="text-xl font-black uppercase italic tracking-tighter">Entidades_Maestras_Nodos</h2>
-                <button onClick={() => setIsCreateArtistModalOpen(true)} className="bg-purple-600 text-white text-[9px] font-black px-4 py-1 uppercase italic hover:bg-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.4)]">
-                    + Nueva_Entidad
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {artists.map(art => {
-                  const artAssets = assets.filter(a => a.parent_artist_ids.includes(art.artist_id));
-                  const totalYieldArt = destinations.filter(d => artAssets.some(aa=>aa.sku_id === d.asset_sku)).reduce((x,y)=>x+y.revenue_generated,0);
-                  const totalScoreArt = artAssets.reduce((x,y)=>x+calculateAssetScore(y.pins),0);
-                  return (
-                    <div key={art.artist_id} className="bg-white/5 p-4 border border-white/5 hover:border-purple-500/50 flex justify-between items-center cursor-pointer group transition-all" onClick={() => setSelectedArtistId(art.artist_id)}>
-                      <div className="flex flex-col">
-                        <span className="text-sm font-black group-hover:text-purple-400">{art.name}</span>
-                        <span className="text-[8px] opacity-40 uppercase tracking-widest">{art.artist_id} // {art.market_tier}</span>
-                      </div>
-                      <div className="flex gap-4 text-[10px] font-bold">
-                         <div className="text-right"><span className="block opacity-40 text-[7px] uppercase">Assets</span>{artAssets.length}</div>
-                         <div className="text-right text-pink-500"><span className="block opacity-40 text-[7px] uppercase">Score</span>{totalScoreArt.toFixed(0)}</div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
+               <div className="flex justify-between items-center border-b border-purple-500/20 pb-4">
+                 <h2 className="text-xl font-black uppercase italic tracking-tighter">Entidades_Maestras</h2>
+                 <button onClick={() => setIsCreateArtistModalOpen(true)} className="bg-purple-600 text-white text-[9px] font-black px-4 py-1 uppercase italic hover:bg-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.4)]">
+                     + Nueva_Entidad
+                 </button>
+               </div>
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                 {artists.map(art => {
+                   const artAssets = assets.filter(a => a.parent_artist_ids.includes(art.artist_id));
+                   const totalScoreArt = artAssets.reduce((x,y)=>x+calculateAssetScore(y.pins),0);
+                   return (
+                     <div key={art.artist_id} className="bg-white/5 p-4 border border-white/5 hover:border-purple-500/50 flex justify-between items-center cursor-pointer group transition-all" onClick={() => setSelectedArtistId(art.artist_id)}>
+                       <div className="flex flex-col">
+                         <span className="text-sm font-black group-hover:text-purple-400">{art.name}</span>
+                         <span className="text-[8px] opacity-40 uppercase tracking-widest">{art.artist_id} // {art.market_tier}</span>
+                       </div>
+                       <div className="flex gap-4 text-[10px] font-bold">
+                           <div className="text-right"><span className="block opacity-40 text-[7px] uppercase">Assets</span>{artAssets.length}</div>
+                           <div className="text-right text-pink-500"><span className="block opacity-40 text-[7px] uppercase">Score</span>{totalScoreArt.toFixed(0)}</div>
+                       </div>
+                     </div>
+                   );
+                 })}
+               </div>
+             </div>
           )}
 
           {activeTab === 'FINANZAS' && (
-            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
-               {/* Sección Finanzas se mantiene igual visualmente */}
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-[#00ff41]/20 pb-6 gap-6">
-                <div>
-                  <h2 className="text-3xl font-black uppercase italic tracking-tighter leading-none">Ledger_Global_ERP_Capital</h2>
-                  <p className="text-[10px] opacity-40 mt-2 font-black uppercase italic tracking-widest tracking-[0.3em]">Gestión de Yield y Pool de Créditos ($2/Crédito)</p>
-                </div>
-                <div className="flex gap-4">
-                  <div className="bg-yellow-500/10 border border-yellow-500/40 p-5 text-right">
-                    <div className="text-[8px] opacity-60 uppercase font-black">Yield_Total_Pool</div>
-                    <div className="text-3xl font-black text-yellow-500">${totalYield.toFixed(0)}</div>
-                  </div>
-                  <div className="bg-blue-400/10 border border-blue-400/40 p-5 text-right">
-                    <div className="text-[8px] opacity-60 uppercase font-black">Créditos_Pool</div>
-                    <div className="text-3xl font-black text-blue-400">{globalCredits}</div>
-                  </div>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="bg-white/5 border border-white/10 p-6 flex flex-col gap-6">
-                   <h3 className="text-xs font-black uppercase italic border-l-2 border-[#00ff41] pl-3 py-1">Inyectar_Capital_Operativo</h3>
-                   <div className="flex flex-col gap-3">
-                      <label className="text-[10px] opacity-40 font-black uppercase">Monto USD (Inyección de capitalización)</label>
-                      <div className="flex gap-2">
-                        <input type="number" id="cashInput" placeholder="0.00" className="bg-black border border-white/20 p-4 flex-1 text-yellow-500 font-black text-xl outline-none focus:border-[#00ff41]" />
-                        <button onClick={() => {
-                          const val = (document.getElementById('cashInput') as HTMLInputElement).value;
-                          if (val) executeCommand(`abonar ${val}`);
-                        }} className="bg-[#00ff41] text-black px-10 font-black uppercase italic text-xs hover:bg-white transition-all shadow-lg">Inyectar</button>
-                      </div>
-                   </div>
-                </div>
-                <div className="bg-white/5 border border-white/10 p-6 flex flex-col gap-6">
-                   <h3 className="text-xs font-black uppercase italic border-l-2 border-red-500 pl-3 py-1">Consumo_por_Entrega</h3>
-                   <div className="flex flex-col gap-3">
-                      <label className="text-[10px] opacity-40 font-black uppercase">Cantidad de créditos (Diseños liquidados)</label>
-                      <div className="flex gap-2">
-                        <input type="number" id="consumeInput" placeholder="0" className="bg-black border border-white/20 p-4 flex-1 text-red-500 font-black text-xl outline-none focus:border-red-500" />
-                        <button onClick={() => {
-                          const val = (document.getElementById('consumeInput') as HTMLInputElement).value;
-                          if (val) executeCommand(`consumir ${val}`);
-                        }} className="bg-red-600 text-white px-10 font-black uppercase italic text-xs hover:bg-red-500 transition-all shadow-lg">Entregar</button>
-                      </div>
-                   </div>
-                </div>
-              </div>
-              <div className="bg-black/40 border border-white/5 p-4 flex-1">
-                 <h3 className="text-[10px] opacity-40 uppercase font-black mb-4 border-b border-white/10 pb-2">Registro_Sincronizado_de_Movimientos</h3>
-                 <div className="h-[300px] overflow-y-auto custom-scrollbar">
-                    <table className="w-full text-[10px] uppercase text-left">
-                      <thead className="opacity-40 font-bold border-b border-white/5">
-                        <tr>
-                          <th className="p-2">Fecha_Timestamp</th>
-                          <th className="p-2">Fuente_Nodo</th>
-                          <th className="p-2">Monto_USD</th>
-                          <th className="p-2">Delta_Cred</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...transactions].reverse().map(tx => (
-                          <tr key={tx.trans_id} className="border-b border-white/5 hover:bg-white/5 transition-all">
-                            <td className="p-2 font-mono">{new Date(tx.date).toLocaleString()}</td>
-                            <td className="p-2 font-black">{tx.source_type}</td>
-                            <td className="p-2 text-yellow-500 font-black">${tx.amount.toFixed(2)}</td>
-                            <td className={`p-2 font-black ${tx.credits_delta && tx.credits_delta > 0 ? 'text-green-400' : 'text-red-400'}`}>{tx.credits_delta ? `${tx.credits_delta > 0 ? '+' : ''}${tx.credits_delta}` : '--'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
+               <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-[#00ff41]/20 pb-6 gap-6">
+                 <div>
+                   <h2 className="text-3xl font-black uppercase italic tracking-tighter leading-none">Ledger_Global_ERP</h2>
+                   <p className="text-[10px] opacity-40 mt-2 font-black uppercase italic tracking-widest tracking-[0.3em]">Gestión de Yield y Pool de Créditos ($2/Crédito)</p>
                  </div>
-              </div>
-            </div>
+                 <div className="flex gap-4">
+                   <div className="bg-yellow-500/10 border border-yellow-500/40 p-5 text-right">
+                     <div className="text-[8px] opacity-60 uppercase font-black">Yield_Total_Pool</div>
+                     <div className="text-3xl font-black text-yellow-500">${totalYield.toFixed(0)}</div>
+                   </div>
+                   <div className="bg-blue-400/10 border border-blue-400/40 p-5 text-right">
+                     <div className="text-[8px] opacity-60 uppercase font-black">Créditos_Pool</div>
+                     <div className="text-3xl font-black text-blue-400">{globalCredits}</div>
+                   </div>
+                 </div>
+               </div>
+               
+               <div className="bg-black/40 border border-white/5 p-4 flex-1">
+                  <h3 className="text-[10px] opacity-40 uppercase font-black mb-4 border-b border-white/10 pb-2">Registro_Sincronizado</h3>
+                  <div className="h-[300px] overflow-y-auto custom-scrollbar">
+                     <table className="w-full text-[10px] uppercase text-left">
+                       <thead className="opacity-40 font-bold border-b border-white/5">
+                         <tr>
+                           <th className="p-2">Fecha</th>
+                           <th className="p-2">Fuente</th>
+                           <th className="p-2">Monto</th>
+                           <th className="p-2">Delta</th>
+                         </tr>
+                       </thead>
+                       <tbody>
+                         {[...transactions].reverse().map(tx => (
+                           <tr key={tx.trans_id} className="border-b border-white/5 hover:bg-white/5 transition-all">
+                             <td className="p-2 font-mono">{new Date(tx.date).toLocaleString()}</td>
+                             <td className="p-2 font-black">{tx.source_type}</td>
+                             <td className="p-2 text-yellow-500 font-black">${tx.amount.toFixed(2)}</td>
+                             <td className={`p-2 font-black ${tx.credits_delta && tx.credits_delta > 0 ? 'text-green-400' : 'text-red-400'}`}>{tx.credits_delta ? `${tx.credits_delta > 0 ? '+' : ''}${tx.credits_delta}` : '--'}</td>
+                           </tr>
+                         ))}
+                       </tbody>
+                     </table>
+                  </div>
+               </div>
+             </div>
           )}
 
           {activeTab === 'AUDITORIA' && (
              <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
-                {/* Sección Auditoria se mantiene igual */}
                <div className="border-b-2 border-red-600/40 pb-6 mb-4">
                  <h2 className="text-3xl font-black text-red-500 uppercase italic tracking-tighter leading-none">Salud_del_Kernel_Integridad</h2>
                  <p className="text-[10px] opacity-40 uppercase tracking-widest mt-2 font-bold font-mono tracking-[0.4em]">Audit_Scan_Mode: DEEP // Panóptico Expandido</p>
                </div>
                
-               {/* NUEVA SECCIÓN: LISTA HISTÓRICA DE HUÉRFANOS (PERSISTENTE) */}
+               {/* TABLA DE AUDITORÍA CONECTADA A DB (Missions) */}
                <div className="bg-red-900/5 border border-red-600/50 p-0 flex flex-col h-[500px]">
                   <div className="flex justify-between items-center p-4 bg-red-900/20 border-b border-red-600/30">
                       <h3 className="text-sm font-black text-red-500 uppercase">Cola de Procesamiento de Huérfanos</h3>
@@ -662,83 +550,52 @@ const App: React.FC = () => {
                       <table className="w-full text-left text-[10px] uppercase font-mono">
                           <thead className="bg-black sticky top-0 text-red-600/60 font-black">
                               <tr>
-                                  <th className="p-3 border-b border-red-900/30">FECHA DETECCIÓN</th>
-                                  <th className="p-3 border-b border-red-900/30">ID EVENTO</th>
-                                  <th className="p-3 border-b border-red-900/30">DETALLE DEL ACTIVO</th>
+                                  <th className="p-3 border-b border-red-900/30">ID PIN</th>
+                                  <th className="p-3 border-b border-red-900/30">MÉTRICAS CAPTURADAS (DB)</th>
                                   <th className="p-3 border-b border-red-900/30 text-right">ACCIÓN</th>
                               </tr>
                           </thead>
                           <tbody className="divide-y divide-red-900/20">
                               {auditOrphanList.length === 0 ? (
-                                  <tr><td colSpan={4} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
+                                  <tr><td colSpan={3} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
                               ) : (
-                                  auditOrphanList.map(m => (
-                                      <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
-                                          <td className="p-3 opacity-50">{new Date(m.created_at).toLocaleString()}</td>
-                                          <td className="p-3 text-red-400 font-bold">{m.id}</td>
-                                          <td className="p-3">
-                                              <div className="font-bold text-white">{m.message}</div>
-                                              <div className="text-[9px] opacity-50 mt-1">{m.evidence.join(' // ')}</div>
-                                          </td>
-                                          <td className="p-3 text-right">
-                                              <button 
-                                                  onClick={() => {
-                                                      const pinId = m.id.replace('ORPHAN-', '');
-                                                      // Copiar al portapapeles y abrir modal
-                                                      navigator.clipboard.writeText(pinId); 
-                                                      alert(`ID ${pinId} copiado al portapapeles.`);
-                                                      setIsCreateAssetModalOpen(true);
-                                                  }}
-                                                  className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]"
-                                              >
-                                                  RECLAMAR / CREAR
-                                              </button>
-                                          </td>
-                                      </tr>
-                                  ))
+                                  auditOrphanList.map(m => {
+                                      // Recuperamos las métricas del texto guardado en DB
+                                      const stats = parseEvidence(m.evidence);
+                                      const pinId = m.id.replace('ORPHAN-', '');
+
+                                      return (
+                                        <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
+                                            <td className="p-3 text-red-400 font-bold">{pinId}</td>
+                                            <td className="p-3">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                   <span className="text-yellow-500 font-black text-xs">SCORE: {stats.score}</span>
+                                                   <span className="text-[9px] text-white opacity-50">{m.message}</span>
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-2 text-[9px] opacity-70 font-mono">
+                                                   <div><span className="text-red-400">IMP:</span> {stats.imp}</div>
+                                                   <div><span className="text-blue-400">SAVE:</span> {stats.save}</div>
+                                                   <div><span className="text-green-400">OUT:</span> {stats.out}</div>
+                                                </div>
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                <button 
+                                                    onClick={() => {
+                                                        navigator.clipboard.writeText(pinId); 
+                                                        setIsCreateAssetModalOpen(true);
+                                                    }}
+                                                    className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]"
+                                                >
+                                                    RECLAMAR
+                                                </button>
+                                            </td>
+                                        </tr>
+                                      );
+                                  })
                               )}
                           </tbody>
                       </table>
                   </div>
-               </div>
-
-               <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
-                 {[
-                   {l:'RAW_FILES',v:assets.filter(a=>a.source_status===SourceStatus.RAW).length, c:'text-white'},
-                   {l:'EXPORTED',v:assets.filter(a=>a.source_status===SourceStatus.EXPORTED).length, c:'text-[#00ff41]'},
-                   {l:'ZIPPED',v:assets.filter(a=>a.source_status===SourceStatus.ZIPPED).length, c:'text-yellow-500'},
-                   {l:'INCUBACIÓN',v:assets.filter(a=>a.lifecycle_stage===LifecycleStage.INCUBATION).length, c:'text-blue-400'},
-                   {l:'MONETIZACIÓN',v:assets.filter(a=>a.lifecycle_stage===LifecycleStage.MONETIZATION).length, c:'text-green-500'},
-                   {l:'ORPHANS',v:auditOrphanList.length > 0 ? auditOrphanList.length : 'CHECKING', c:'text-red-600 animate-pulse font-black'}
-                 ].map(s=>(
-                   <div key={s.l} className="bg-white/5 p-4 border border-white/10 flex flex-col items-center">
-                     <span className="text-[8px] opacity-40 font-black mb-1">{s.l}</span>
-                     <span className={`text-2xl font-black ${s.c}`}>{s.v}</span>
-                   </div>
-                 ))}
-               </div>
-
-               <div className="space-y-4">
-                 <h3 className="text-xs font-black uppercase italic border-l-4 border-red-500 pl-3 py-1 bg-red-600/5">Seguimiento_de_Incubación_Activa</h3>
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                   {assets.filter(a=>a.lifecycle_stage===LifecycleStage.INCUBATION).map(a => {
-                     const score = calculateAssetScore(a.pins);
-                     const progress = Math.min(100, (score / 500) * 100);
-                     return (
-                       <div key={a.sku_id} className="bg-black border border-white/10 p-4 space-y-3 cursor-pointer hover:border-blue-400/50 transition-all" onClick={() => setSelectedAssetSku(a.sku_id)}>
-                         <div className="flex justify-between items-center text-[10px]">
-                           <span className="font-black text-blue-400">{a.sku_id}</span>
-                           <span className="opacity-40 uppercase font-black">Progreso a Madurez: {progress.toFixed(0)}%</span>
-                         </div>
-                         <div className="w-full h-1 bg-white/5"><div className="h-full bg-blue-400 transition-all shadow-[0_0_10px_rgba(96,165,250,0.5)]" style={{width:`${progress}%`}}></div></div>
-                         <div className="flex justify-between text-[8px] opacity-60 uppercase font-black italic">
-                           <span>Score: {score.toFixed(0)} / 500</span>
-                           <span>Edad: {Math.floor((Date.now() - a.created_at) / (1000*60*60*24))} Días</span>
-                         </div>
-                       </div>
-                     );
-                   })}
-                 </div>
                </div>
              </div>
           )}
@@ -749,7 +606,6 @@ const App: React.FC = () => {
         </aside>
       </main>
 
-      {/* MODALES */}
       {selectedAsset && (
         <AssetDetailModal 
           asset={selectedAsset} 
@@ -770,66 +626,26 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* MODAL CREAR ASSET */}
       {isCreateAssetModalOpen && (
         <CreateAssetModal 
           artists={artists} 
           nextSku={`SKU-${(assets.length+1).toString().padStart(5,'0')}`} 
           onClose={()=>setIsCreateAssetModalOpen(false)} 
           onCreate={handleCreateAsset} 
-          onNewArtist={n=>{
-              const id=`ART-${Date.now()}`; 
-              handleCreateArtist({artist_id:id,name:n,genres:[],market_tier:MarketTier.EMERGING});
-              return id;
-          }} 
+          onNewArtist={n=>{const id=`ART-${Date.now()}`; handleCreateArtist({artist_id:id,name:n,genres:[],market_tier:MarketTier.EMERGING}); return id;}} 
         />
       )}
 
-      {/* MODAL CREAR ARTISTA (NUEVO) */}
-      {isCreateArtistModalOpen && (
-        <CreateArtistModal 
-          onClose={()=>setIsCreateArtistModalOpen(false)} 
-          onCreate={handleCreateArtist} 
-        />
-      )}
+      {isCreateArtistModalOpen && <CreateArtistModal onClose={()=>setIsCreateArtistModalOpen(false)} onCreate={handleCreateArtist} />}
 
-      {/* [INSERCIÓN 4: MODAL DE EMERGENCIA TOKEN] */}
       {showTokenModal && (
-        <div className="fixed inset-0 z-[100] bg-red-950/90 backdrop-blur-lg flex items-center justify-center p-4 animate-in fade-in duration-200">
-            <div className="bg-black border-4 border-red-600 p-8 w-full max-w-2xl shadow-[0_0_100px_rgba(220,38,38,0.5)] relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-full h-2 bg-red-600 animate-pulse"></div>
-                
-                <h2 className="text-3xl font-black text-red-500 mb-4 flex items-center gap-4">
-                    <span className="text-4xl">⚠️</span> PROTOCOLO DE SEGURIDAD ACTIVADO
-                </h2>
-                <p className="text-white mb-6 uppercase font-bold text-sm leading-relaxed border-l-4 border-red-500 pl-4">
-                    El enlace neural con la API de Pinterest ha caducado (Error 401).<br/>
-                    La operación 'CICLO' ha sido abortada para proteger la integridad de los datos.
-                </p>
-                
-                <div className="space-y-2">
-                    <label className="text-[10px] text-red-400 font-black uppercase tracking-widest">Ingrese Nueva Credencial de Acceso (Token 24h)</label>
-                    <input 
-                        type="text" 
-                        autoFocus
-                        placeholder="pina_..." 
-                        className="w-full bg-red-900/20 border border-red-500 p-4 text-white outline-none font-mono text-xs focus:bg-red-900/40 transition-all"
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                                executeCommand(`token ${(e.target as HTMLInputElement).value}`);
-                            }
-                        }}
-                    />
-                </div>
-                
-                <div className="mt-6 flex justify-between items-center text-[10px] text-red-400 font-mono">
-                    <span>ESTADO: SISTEMA BLOQUEADO</span>
-                    <span className="animate-pulse">ESPERANDO INPUT MANUAL... [ENTER] PARA CONFIRMAR</span>
-                </div>
+        <div className="fixed inset-0 z-[100] bg-red-950/90 backdrop-blur-lg flex items-center justify-center p-4">
+            <div className="bg-black border-4 border-red-600 p-8 w-full max-w-2xl relative">
+                <h2 className="text-3xl font-black text-red-500 mb-4">⚠️ PROTOCOLO DE SEGURIDAD</h2>
+                <input type="text" autoFocus placeholder="Token..." className="w-full bg-red-900/20 border border-red-500 p-4 text-white" onKeyDown={(e) => {if (e.key === 'Enter') executeCommand(`token ${(e.target as HTMLInputElement).value}`)}} />
             </div>
         </div>
       )}
-
     </div>
   );
 };
