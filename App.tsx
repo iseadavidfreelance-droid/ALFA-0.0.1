@@ -43,6 +43,9 @@ const App: React.FC = () => {
   // Mantenemos orphans para la ingesta en vivo
   const [orphans, setOrphans] = useState<RealPinData[]>([]); 
 
+  // ESTADO DE VINCULACIÓN (NUEVO: Para pasar el ID al modal automáticamente)
+  const [prefillPinId, setPrefillPinId] = useState<string>('');
+
   const [activeTab, setActiveTab] = useState<'PANEL' | 'INVENTARIO' | 'ARTISTAS' | 'FINANZAS' | 'AUDITORIA'>('PANEL');
   const [selectedAssetSku, setSelectedAssetSku] = useState<string | null>(null);
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
@@ -50,7 +53,6 @@ const App: React.FC = () => {
   const [isCreateAssetModalOpen, setIsCreateAssetModalOpen] = useState(false);
   const [isCreateArtistModalOpen, setIsCreateArtistModalOpen] = useState(false);
   
-  // ESTADO DE ALERTA DE TOKEN
   const [showTokenModal, setShowTokenModal] = useState(false);
   
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -58,7 +60,7 @@ const App: React.FC = () => {
   const [invSort, setInvSort] = useState<'SCORE' | 'OUTBOUND' | 'YIELD'>('SCORE');
   const [invRarityFilter, setInvRarityFilter] = useState<string>('ALL');
   
-  // LOGS CON HISTORIAL
+  // LOGS
   const [terminalLog, setTerminalLog] = useState<string[]>(['ALFA_OS v0.0.1 SYSTEM_BOOT...', 'CONECTANDO A CEREBRO SUPABASE...']);
 
   const log = (msg: string) => {
@@ -67,25 +69,21 @@ const App: React.FC = () => {
     setTerminalLog(prev => [...prev.slice(-100), logEntry]);
   };
 
-  // Listener Global del Sistema de Radio
   useEffect(() => {
     const handleSystemLog = (e: any) => {
       const { message, type } = e.detail;
-      
       let style = 'text-white';
       if (type === 'SUCCESS') style = 'text-[#00ff41] font-bold'; 
       if (type === 'WARNING') style = 'text-yellow-500';
       if (type === 'ERROR') style = 'text-red-500 font-black bg-red-900/20';
       if (type === 'SYSTEM') style = 'text-blue-400 italic';
-
       log(`<span class="${style}">${message}</span>`);
     };
-
     window.addEventListener('ALFA_LOG_EVENT', handleSystemLog);
     return () => window.removeEventListener('ALFA_LOG_EVENT', handleSystemLog);
   }, []);
 
-  // --- CARGA INICIAL DE DATOS (READ) ---
+  // --- CARGA INICIAL DE DATOS ---
   const fetchDatabase = async () => {
     try {
       const { data: dbAssets, error: assetError } = await supabase.from('assets').select('*');
@@ -126,33 +124,55 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // --- MANEJADORES DE ESCRITURA (WRITE) ---
+  // --- MANEJADORES DE ESCRITURA ---
   const handleCreateAsset = async (newAsset: Asset) => {
-    setAssets(prev => [...prev, newAsset]);
+    // 🔥 HERENCIA DE DATOS (DATA INHERITANCE)
+    // Antes de guardar, buscamos si los pines de este nuevo asset existen en 'orphans'
+    // y copiamos sus métricas reales. Así el asset nace con datos, no en cero.
+    const hydratedPins = newAsset.pins.map(pin => {
+        const orphanMatch = orphans.find(o => o.id === pin.pin_id);
+        if (orphanMatch) {
+            return {
+                ...pin,
+                impressions: orphanMatch.metrics.impression_count,
+                saves: orphanMatch.metrics.save_count,
+                clicks: orphanMatch.metrics.pin_click_count,
+                outbound_clicks: orphanMatch.metrics.outbound_click_count
+            };
+        }
+        return pin;
+    });
+
+    const assetToSave = { ...newAsset, pins: hydratedPins };
+
+    setAssets(prev => [...prev, assetToSave]);
     
-    const { pins, ...rest } = newAsset;
-    const dbPayload = {
-      ...rest,
-      metrics_json: { pins: pins } 
-    };
+    const { pins, ...rest } = assetToSave;
+    const dbPayload = { ...rest, metrics_json: { pins: pins } };
 
     const { error } = await supabase.from('assets').insert(dbPayload);
     if (!error) {
-      log(`<span class="text-green-400">ASSET ${newAsset.sku_id} REGISTRADO EN NUBE.</span>`);
-      if (newAsset.pins.length > 0) {
-          const pinId = newAsset.pins[0].pin_id;
-          setOrphans(prev => prev.filter(o => o.id !== pinId));
-          const missionId = `ORPHAN-${pinId}`;
+      log(`<span class="text-green-400">ASSET ${newAsset.sku_id} CREADO CON HERENCIA DE DATOS.</span>`);
+      
+      // Limpieza proactiva
+      if (pins.length > 0) {
+          const pinIds = new Set(pins.map(p => p.pin_id));
+          setOrphans(prev => prev.filter(o => !pinIds.has(o.id)));
           
-          // ACTUALIZACIÓN ROBUSTA DE MISIONES
-          setMissions(prev => {
-             const updated = prev.map(m => m.id === missionId ? {...m, status: 'RESOLVED' as const} : m);
-             return updated;
-          });
-          await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', missionId);
+          const missionsToClose = missions.filter(m => 
+             m.type === 'UNMAPPED_RESOURCE' && pinIds.has(m.id.replace('ORPHAN-', ''))
+          );
+          
+          if(missionsToClose.length > 0) {
+             const ids = missionsToClose.map(m => m.id);
+             setMissions(prev => prev.map(m => ids.includes(m.id) ? {...m, status: 'RESOLVED'} : m));
+             await supabase.from('missions').update({ status: 'RESOLVED' }).in('id', ids);
+             log(`<span class="text-green-500">VINCULACIÓN: ${missionsToClose.length} misiones cerradas.</span>`);
+          }
       }
     }
     setIsCreateAssetModalOpen(false);
+    setPrefillPinId(''); // Reset
   };
 
   const handleCreateArtist = async (newArtist: Artist) => {
@@ -163,12 +183,14 @@ const App: React.FC = () => {
   };
 
   const handleUpdateAsset = async (sku: string, updates: Partial<Asset>, newDestinations?: AssetDestination[]) => {
+    // 1. Update Local
     setAssets(prev => prev.map(a => a.sku_id === sku ? { ...a, ...updates } : a));
     
     if (newDestinations) {
         setDestinations(prev => [...prev.filter(x => x.asset_sku !== sku), ...newDestinations]);
     }
 
+    // 2. Persistir
     const dbUpdates: any = { ...updates };
     if (updates.pins) {
       dbUpdates.metrics_json = { pins: updates.pins };
@@ -176,6 +198,24 @@ const App: React.FC = () => {
     }
     await supabase.from('assets').update(dbUpdates).eq('sku_id', sku);
     log(`<span class="text-blue-400">CAMBIOS EN ${sku} CONFIRMADOS.</span>`);
+
+    // 3. Limpieza Inteligente
+    if (updates.pins && updates.pins.length > 0) {
+        const addedPinIds = new Set(updates.pins.map(p => p.pin_id));
+        setOrphans(prev => prev.filter(o => !addedPinIds.has(o.id)));
+        const missionsToResolve = missions.filter(m => 
+            m.status === 'OPEN' && 
+            m.type === 'UNMAPPED_RESOURCE' && 
+            addedPinIds.has(m.id.replace('ORPHAN-', ''))
+        );
+
+        if (missionsToResolve.length > 0) {
+            const idsToClose = missionsToResolve.map(m => m.id);
+            setMissions(prev => prev.map(m => idsToClose.includes(m.id) ? { ...m, status: 'RESOLVED' } : m));
+            await supabase.from('missions').update({ status: 'RESOLVED' }).in('id', idsToClose);
+            log(`<span class="text-green-500 font-bold">VINCULACIÓN EXITOSA: ${missionsToResolve.length} alertas resueltas.</span>`);
+        }
+    }
   };
 
   const executeCommand = async (rawCmd: string) => {
@@ -225,7 +265,6 @@ const App: React.FC = () => {
         const target = parts[1]?.toUpperCase();
         setMissions(prev => {
             const updated = prev.map(m => m.asset_sku === target ? { ...m, status: 'RESOLVED' as const } : m);
-            // Sync con DB para la misión cerrada
             const closed = updated.find(m => m.asset_sku === target && m.status === 'RESOLVED');
             if(closed) supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', closed.id).then();
             return updated;
@@ -239,7 +278,6 @@ const App: React.FC = () => {
         try {
           const apiKey = process.env.GEMINI_API_KEY; 
           if (!apiKey) throw new Error("API Key no configurada");
-          
           const ai = new GoogleGenAI({ apiKey });
           const response = await ai.models.generateContent({
             model: 'gemini-2.0-flash', 
@@ -262,43 +300,53 @@ const App: React.FC = () => {
     try {
         log(`<span class="text-blue-400">INICIANDO CICLO DIARIO...</span>`);
 
-        // 1. Obtener Datos Reales de Pinterest
         const realPins = await pinterestService.fetchAllPins();
-        
-        // 2. Ejecutar Motor de Integridad
         const integrityResult = runIntegrityCheck(assets, realPins);
-        
         setOrphans(integrityResult.orphans);
 
-        // 3. Actualizar Assets con métricas reales
+        // AUTO-HEALING
+        const currentRegisteredPinIds = new Set<string>();
+        integrityResult.mappedPins.forEach(pins => pins.forEach(p => currentRegisteredPinIds.add(p.pin_id)));
+
+        const obsoleteMissions = missions
+            .filter(m => m.type === 'UNMAPPED_RESOURCE' && m.status === 'OPEN')
+            .filter(m => {
+                const pinId = m.id.replace('ORPHAN-', '');
+                return currentRegisteredPinIds.has(pinId);
+            })
+            .map(m => ({ ...m, status: 'RESOLVED' as const }));
+
+        if (obsoleteMissions.length > 0) {
+             await supabase.from('missions').upsert(obsoleteMissions);
+             log(`<span class="text-green-500">AUTO-HEALING: ${obsoleteMissions.length} misiones de huérfanos cerradas (ya vinculadas).</span>`);
+        }
+
+        // Update Assets
         let processedAssets = assets.map(a => {
             const newMetrics = integrityResult.mappedPins.get(a.sku_id);
             return newMetrics ? { ...a, pins: newMetrics } : a;
         });
 
-        // 4. Persistencia de Misiones (Integridad)
+        // New Misions
         const newMissions = integrityResult.missions;
         if (newMissions.length > 0) {
             const { error } = await supabase.from('missions').upsert(newMissions);
             if (error) console.error("Error DB Misiones:", error);
-            log(`<span class="text-red-500 font-bold">ALERTA: ${newMissions.length} ANOMALÍAS REGISTRADAS EN BD.</span>`);
+            log(`<span class="text-red-500 font-bold">ALERTA: ${newMissions.length} NUEVAS ANOMALÍAS DETECTADAS.</span>`);
         } else {
-            log(`<span class="text-green-500">INTEGRIDAD DE RED: 100% (Sin nuevos huérfanos).</span>`);
+            log(`<span class="text-green-500">INTEGRIDAD: Sin nuevos huérfanos detectados.</span>`);
         }
 
-        // 5. Motores Lógicos
+        // Engines
         const maturedAssets = runIncubationEngine(processedAssets);
         const finalAssets = calculateRarityByPercentile(maturedAssets, destinations);
         const leakMissions = runLeakHunter(finalAssets, destinations);
 
-        if (leakMissions.length > 0) {
-             await supabase.from('missions').upsert(leakMissions);
-        }
+        if (leakMissions.length > 0) await supabase.from('missions').upsert(leakMissions);
 
-        // 6. [SNAPSHOTS] Historial de Métricas
+        // Snapshots
         const timestampISO = new Date().toISOString(); 
         const snapshots: any[] = []; 
-
         finalAssets.forEach(asset => {
             asset.pins.forEach(pin => {
                 snapshots.push({
@@ -316,22 +364,15 @@ const App: React.FC = () => {
         if (snapshots.length > 0) {
            const { error: snapError } = await supabase.from('pin_snapshots').insert(snapshots);
            if (snapError) console.error("Error guardando historial:", snapError);
-           log(`<span class="text-yellow-500">HISTORIAL: ${snapshots.length} registros guardados en DB.</span>`);
+           log(`<span class="text-yellow-500">HISTORIAL: ${snapshots.length} registros guardados.</span>`);
         }
 
-        // 7. ACTUALIZACIÓN DE ESTADO FINAL (CORREGIDA PARA SOBRESCRIBIR)
+        // Final State Update
         setAssets(finalAssets);
-        
-        // ⚠️ CORRECCIÓN CLAVE: Usamos un Mapa para asegurar que las misiones NUEVAS
-        // con datos actualizados (SCORE, etc.) sobrescriban a las viejas en memoria.
         setMissions(prev => {
             const missionMap = new Map(prev.map(m => [m.id, m]));
-            
-            // Inyectamos las nuevas (Integridad + Fugas) sobre las viejas
-            [...newMissions, ...leakMissions].forEach(m => {
-                missionMap.set(m.id, m);
-            });
-            
+            obsoleteMissions.forEach(m => missionMap.set(m.id, m));
+            [...newMissions, ...leakMissions].forEach(m => missionMap.set(m.id, m));
             return Array.from(missionMap.values());
         });
 
@@ -339,11 +380,11 @@ const App: React.FC = () => {
 
     } catch (error: any) {
         if (error.message === 'TOKEN_EXPIRED') {
-            log(`<span class="text-red-600 font-black bg-red-900/20 blink">!!! ALERTA: CREDENCIAL PINTEREST CADUCADA !!!</span>`);
+            log(`<span class="text-red-600 font-black bg-red-900/20 blink">!!! TOKEN CADUCADO !!!</span>`);
             setShowTokenModal(true);
         } else {
             console.error(error);
-            log(`<span class="text-red-500">FALLO CRÍTICO EN CICLO: ${error.message}</span>`);
+            log(`<span class="text-red-500">FALLO CRÍTICO: ${error.message}</span>`);
         }
     }
   }, [assets, destinations]);
@@ -355,9 +396,7 @@ const App: React.FC = () => {
       const s = invSearch.toUpperCase();
       list = list.filter(a => a.sku_id.includes(s) || a.display_name.includes(s));
     }
-    if (invRarityFilter !== 'ALL') {
-      list = list.filter(a => a.current_rarity === invRarityFilter);
-    }
+    if (invRarityFilter !== 'ALL') list = list.filter(a => a.current_rarity === invRarityFilter);
     
     list.sort((a, b) => {
       if (invSort === 'SCORE') return calculateAssetScore(b.pins) - calculateAssetScore(a.pins);
@@ -373,7 +412,6 @@ const App: React.FC = () => {
 
   const selectedAsset = useMemo(() => assets.find(a => a.sku_id === selectedAssetSku) || null, [assets, selectedAssetSku]);
 
-  // LISTA DE AUDITORÍA (Ordenada por SCORE real extraído del texto)
   const auditOrphanList = useMemo(() => {
       return missions
         .filter(m => m.type === 'UNMAPPED_RESOURCE' && m.status === 'OPEN')
@@ -382,7 +420,7 @@ const App: React.FC = () => {
                 const line = m.evidence.find(s => s.startsWith('SCORE:'));
                 return line ? parseInt(line.split(':')[1]) : 0;
             };
-            return getScore(b) - getScore(a); // Mayor score arriba
+            return getScore(b) - getScore(a);
         });
   }, [missions]);
 
@@ -470,80 +508,11 @@ const App: React.FC = () => {
             </div>
           )}
           
-          {activeTab === 'AUDITORIA' && (
-             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
-               <div className="border-b-2 border-red-600/40 pb-6 mb-4">
-                 <h2 className="text-3xl font-black text-red-500 uppercase italic tracking-tighter leading-none">Salud_del_Kernel_Integridad</h2>
-                 <p className="text-[10px] opacity-40 uppercase tracking-widest mt-2 font-bold font-mono tracking-[0.4em]">Audit_Scan_Mode: DEEP // Panóptico Expandido</p>
-               </div>
-               
-               <div className="bg-red-900/5 border border-red-600/50 p-0 flex flex-col h-[500px]">
-                  <div className="flex justify-between items-center p-4 bg-red-900/20 border-b border-red-600/30">
-                      <h3 className="text-sm font-black text-red-500 uppercase">Cola de Procesamiento de Huérfanos</h3>
-                      <div className="text-[10px] font-mono text-red-400">{auditOrphanList.length} EVENTOS PENDIENTES</div>
-                  </div>
-                  
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                      <table className="w-full text-left text-[10px] uppercase font-mono">
-                          <thead className="bg-black sticky top-0 text-red-600/60 font-black">
-                              <tr>
-                                  <th className="p-3 border-b border-red-900/30">ID PIN</th>
-                                  <th className="p-3 border-b border-red-900/30">MÉTRICAS CAPTURADAS (DB)</th>
-                                  <th className="p-3 border-b border-red-900/30 text-right">ACCIÓN</th>
-                              </tr>
-                          </thead>
-                          <tbody className="divide-y divide-red-900/20">
-                              {auditOrphanList.length === 0 ? (
-                                  <tr><td colSpan={3} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
-                              ) : (
-                                  auditOrphanList.map(m => {
-                                      const stats = parseEvidence(m.evidence);
-                                      const pinId = m.id.replace('ORPHAN-', '');
-
-                                      return (
-                                        <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
-                                            <td className="p-3 text-red-400 font-bold">{pinId}</td>
-                                            <td className="p-3">
-                                                <div className="flex items-center gap-2 mb-1">
-                                                   <span className="text-yellow-500 font-black text-xs">SCORE: {stats.score}</span>
-                                                   <span className="text-[9px] text-white opacity-50">{m.message}</span>
-                                                </div>
-                                                <div className="grid grid-cols-3 gap-2 text-[9px] opacity-70 font-mono">
-                                                   <div><span className="text-red-400">IMP:</span> {stats.imp}</div>
-                                                   <div><span className="text-blue-400">SAVE:</span> {stats.save}</div>
-                                                   <div><span className="text-green-400">OUT:</span> {stats.out}</div>
-                                                </div>
-                                            </td>
-                                            <td className="p-3 text-right">
-                                                <button 
-                                                    onClick={() => {
-                                                        navigator.clipboard.writeText(pinId); 
-                                                        setIsCreateAssetModalOpen(true);
-                                                    }}
-                                                    className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]"
-                                                >
-                                                    RECLAMAR
-                                                </button>
-                                            </td>
-                                        </tr>
-                                      );
-                                  })
-                              )}
-                          </tbody>
-                      </table>
-                  </div>
-               </div>
-             </div>
-          )}
-          
-          {/* ... (Resto de pestañas ARTISTAS y FINANZAS se mantienen igual) ... */}
           {activeTab === 'ARTISTAS' && (
              <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
                <div className="flex justify-between items-center border-b border-purple-500/20 pb-4">
                  <h2 className="text-xl font-black uppercase italic tracking-tighter">Entidades_Maestras</h2>
-                 <button onClick={() => setIsCreateArtistModalOpen(true)} className="bg-purple-600 text-white text-[9px] font-black px-4 py-1 uppercase italic hover:bg-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.4)]">
-                     + Nueva_Entidad
-                 </button>
+                 <button onClick={() => setIsCreateArtistModalOpen(true)} className="bg-purple-600 text-white text-[9px] font-black px-4 py-1 uppercase italic hover:bg-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.4)]">+ Nueva_Entidad</button>
                </div>
                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                  {artists.map(art => {
@@ -574,40 +543,81 @@ const App: React.FC = () => {
                    <p className="text-[10px] opacity-40 mt-2 font-black uppercase italic tracking-widest tracking-[0.3em]">Gestión de Yield y Pool de Créditos ($2/Crédito)</p>
                  </div>
                  <div className="flex gap-4">
-                   <div className="bg-yellow-500/10 border border-yellow-500/40 p-5 text-right">
-                     <div className="text-[8px] opacity-60 uppercase font-black">Yield_Total_Pool</div>
-                     <div className="text-3xl font-black text-yellow-500">${totalYield.toFixed(0)}</div>
-                   </div>
-                   <div className="bg-blue-400/10 border border-blue-400/40 p-5 text-right">
-                     <div className="text-[8px] opacity-60 uppercase font-black">Créditos_Pool</div>
-                     <div className="text-3xl font-black text-blue-400">{globalCredits}</div>
-                   </div>
+                   <div className="bg-yellow-500/10 border border-yellow-500/40 p-5 text-right"><div className="text-[8px] opacity-60 uppercase font-black">Yield_Total_Pool</div><div className="text-3xl font-black text-yellow-500">${totalYield.toFixed(0)}</div></div>
+                   <div className="bg-blue-400/10 border border-blue-400/40 p-5 text-right"><div className="text-[8px] opacity-60 uppercase font-black">Créditos_Pool</div><div className="text-3xl font-black text-blue-400">{globalCredits}</div></div>
                  </div>
                </div>
-               
                <div className="bg-black/40 border border-white/5 p-4 flex-1">
                   <h3 className="text-[10px] opacity-40 uppercase font-black mb-4 border-b border-white/10 pb-2">Registro_Sincronizado</h3>
                   <div className="h-[300px] overflow-y-auto custom-scrollbar">
                      <table className="w-full text-[10px] uppercase text-left">
                        <thead className="opacity-40 font-bold border-b border-white/5">
-                         <tr>
-                           <th className="p-2">Fecha</th>
-                           <th className="p-2">Fuente</th>
-                           <th className="p-2">Monto</th>
-                           <th className="p-2">Delta</th>
-                         </tr>
+                         <tr><th className="p-2">Fecha</th><th className="p-2">Fuente</th><th className="p-2">Monto</th><th className="p-2">Delta</th></tr>
                        </thead>
                        <tbody>
                          {[...transactions].reverse().map(tx => (
                            <tr key={tx.trans_id} className="border-b border-white/5 hover:bg-white/5 transition-all">
-                             <td className="p-2 font-mono">{new Date(tx.date).toLocaleString()}</td>
-                             <td className="p-2 font-black">{tx.source_type}</td>
-                             <td className="p-2 text-yellow-500 font-black">${tx.amount.toFixed(2)}</td>
-                             <td className={`p-2 font-black ${tx.credits_delta && tx.credits_delta > 0 ? 'text-green-400' : 'text-red-400'}`}>{tx.credits_delta ? `${tx.credits_delta > 0 ? '+' : ''}${tx.credits_delta}` : '--'}</td>
+                             <td className="p-2 font-mono">{new Date(tx.date).toLocaleString()}</td><td className="p-2 font-black">{tx.source_type}</td><td className="p-2 text-yellow-500 font-black">${tx.amount.toFixed(2)}</td><td className={`p-2 font-black ${tx.credits_delta && tx.credits_delta > 0 ? 'text-green-400' : 'text-red-400'}`}>{tx.credits_delta ? `${tx.credits_delta > 0 ? '+' : ''}${tx.credits_delta}` : '--'}</td>
                            </tr>
                          ))}
                        </tbody>
                      </table>
+                  </div>
+               </div>
+             </div>
+          )}
+
+          {activeTab === 'AUDITORIA' && (
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
+               <div className="border-b-2 border-red-600/40 pb-6 mb-4">
+                 <h2 className="text-3xl font-black text-red-500 uppercase italic tracking-tighter leading-none">Salud_del_Kernel_Integridad</h2>
+                 <p className="text-[10px] opacity-40 uppercase tracking-widest mt-2 font-bold font-mono tracking-[0.4em]">Audit_Scan_Mode: DEEP // Panóptico Expandido</p>
+               </div>
+               
+               <div className="bg-red-900/5 border border-red-600/50 p-0 flex flex-col h-[500px]">
+                  <div className="flex justify-between items-center p-4 bg-red-900/20 border-b border-red-600/30">
+                      <h3 className="text-sm font-black text-red-500 uppercase">Cola de Procesamiento de Huérfanos</h3>
+                      <div className="text-[10px] font-mono text-red-400">{auditOrphanList.length} EVENTOS PENDIENTES</div>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto custom-scrollbar">
+                      <table className="w-full text-left text-[10px] uppercase font-mono">
+                          <thead className="bg-black sticky top-0 text-red-600/60 font-black">
+                              <tr><th className="p-3 border-b border-red-900/30">ID PIN</th><th className="p-3 border-b border-red-900/30">MÉTRICAS CAPTURADAS (DB)</th><th className="p-3 border-b border-red-900/30 text-right">ACCIÓN</th></tr>
+                          </thead>
+                          <tbody className="divide-y divide-red-900/20">
+                              {auditOrphanList.length === 0 ? (
+                                  <tr><td colSpan={3} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
+                              ) : (
+                                  auditOrphanList.map(m => {
+                                      const stats = parseEvidence(m.evidence);
+                                      const pinId = m.id.replace('ORPHAN-', '');
+                                      return (
+                                        <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
+                                            <td className="p-3 text-red-400 font-bold">{pinId}</td>
+                                            <td className="p-3">
+                                                <div className="flex items-center gap-2 mb-1"><span className="text-yellow-500 font-black text-xs">SCORE: {stats.score}</span><span className="text-[9px] text-white opacity-50">{m.message}</span></div>
+                                                <div className="grid grid-cols-3 gap-2 text-[9px] opacity-70 font-mono">
+                                                   <div><span className="text-red-400">IMP:</span> {stats.imp}</div>
+                                                   <div><span className="text-blue-400">SAVE:</span> {stats.save}</div>
+                                                   <div><span className="text-green-400">OUT:</span> {stats.out}</div>
+                                                </div>
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                <button onClick={() => {
+                                                    // 1. Copiar ID (Mecanismo Fallback)
+                                                    navigator.clipboard.writeText(pinId); 
+                                                    // 2. Pre-llenar el modal (Nuevo Mecanismo Automático)
+                                                    setPrefillPinId(pinId);
+                                                    setIsCreateAssetModalOpen(true);
+                                                }} className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]">RECLAMAR</button>
+                                            </td>
+                                        </tr>
+                                      );
+                                  })
+                              )}
+                          </tbody>
+                      </table>
                   </div>
                </div>
              </div>
@@ -619,46 +629,14 @@ const App: React.FC = () => {
         </aside>
       </main>
 
-      {selectedAsset && (
-        <AssetDetailModal 
-          asset={selectedAsset} 
-          destinations={destinations.filter(d=>d.asset_sku===selectedAssetSku)} 
-          onClose={()=>setSelectedAssetSku(null)} 
-          onAction={executeCommand} 
-          onUpdate={handleUpdateAsset} 
-        />
-      )}
+      {selectedAsset && <AssetDetailModal asset={selectedAsset} destinations={destinations.filter(d=>d.asset_sku===selectedAssetSku)} onClose={()=>setSelectedAssetSku(null)} onAction={executeCommand} onUpdate={handleUpdateAsset} />}
+      {selectedArtistId && <EntityDetailModal artist={artists.find(a=>a.artist_id===selectedArtistId)!} assets={assets.filter(a=>a.parent_artist_ids.includes(selectedArtistId))} destinations={destinations} onClose={()=>setSelectedArtistId(null)} onUpdate={(id, updates) => setArtists(p => p.map(a=>a.artist_id===id ? {...a, ...updates} : a))} />}
       
-      {selectedArtistId && (
-        <EntityDetailModal 
-          artist={artists.find(a=>a.artist_id===selectedArtistId)!} 
-          assets={assets.filter(a=>a.parent_artist_ids.includes(selectedArtistId))}
-          destinations={destinations}
-          onClose={()=>setSelectedArtistId(null)}
-          onUpdate={(id, updates) => setArtists(p => p.map(a=>a.artist_id===id ? {...a, ...updates} : a))} 
-        />
-      )}
-
-      {isCreateAssetModalOpen && (
-        <CreateAssetModal 
-          artists={artists} 
-          nextSku={`SKU-${(assets.length+1).toString().padStart(5,'0')}`} 
-          onClose={()=>setIsCreateAssetModalOpen(false)} 
-          onCreate={handleCreateAsset} 
-          onNewArtist={n=>{const id=`ART-${Date.now()}`; handleCreateArtist({artist_id:id,name:n,genres:[],market_tier:MarketTier.EMERGING}); return id;}} 
-        />
-      )}
-
+      {/* SE PASA EL ID AUTOMÁTICO AL MODAL */}
+      {isCreateAssetModalOpen && <CreateAssetModal artists={artists} nextSku={`SKU-${(assets.length+1).toString().padStart(5,'0')}`} onClose={()=>setIsCreateAssetModalOpen(false)} onCreate={handleCreateAsset} onNewArtist={n=>{const id=`ART-${Date.now()}`; handleCreateArtist({artist_id:id,name:n,genres:[],market_tier:MarketTier.EMERGING}); return id;}} initialPinId={prefillPinId} />}
+      
       {isCreateArtistModalOpen && <CreateArtistModal onClose={()=>setIsCreateArtistModalOpen(false)} onCreate={handleCreateArtist} />}
-
-      {showTokenModal && (
-        <div className="fixed inset-0 z-[100] bg-red-950/90 backdrop-blur-lg flex items-center justify-center p-4">
-            <div className="bg-black border-4 border-red-600 p-8 w-full max-w-2xl relative">
-                <h2 className="text-3xl font-black text-red-500 mb-4">⚠️ PROTOCOLO DE SEGURIDAD</h2>
-                <input type="text" autoFocus placeholder="Token..." className="w-full bg-red-900/20 border border-red-500 p-4 text-white" onKeyDown={(e) => {if (e.key === 'Enter') executeCommand(`token ${(e.target as HTMLInputElement).value}`)}} />
-            </div>
-        </div>
-      )}
+      {showTokenModal && <div className="fixed inset-0 z-[100] bg-red-950/90 backdrop-blur-lg flex items-center justify-center p-4"><div className="bg-black border-4 border-red-600 p-8 w-full max-w-2xl relative"><h2 className="text-3xl font-black text-red-500 mb-4">⚠️ PROTOCOLO DE SEGURIDAD</h2><input type="text" autoFocus placeholder="Token..." className="w-full bg-red-900/20 border border-red-500 p-4 text-white" onKeyDown={(e) => {if (e.key === 'Enter') executeCommand(`token ${(e.target as HTMLInputElement).value}`)}} /></div></div>}
     </div>
   );
 };
