@@ -1,6 +1,5 @@
 // services/pinterestService.ts
 
-// URL del Proxy
 const BASE_URL = "/api-pinterest/v5"; 
 
 export interface RealPinData {
@@ -21,107 +20,120 @@ const getToken = () => localStorage.getItem('ALFA_PINTEREST_TOKEN') || "";
 
 const getDateRange = () => {
   const end = new Date();
+  end.setDate(end.getDate() - 3); // Mantenemos -3 días por seguridad de datos
+  
   const start = new Date();
-  start.setDate(end.getDate() - 30); 
+  start.setDate(start.getDate() - 33); 
+  
   return {
     startDate: start.toISOString().split('T')[0],
     endDate: end.toISOString().split('T')[0]
   };
 };
 
-// HELPER: Pausa artificial para engañar al rate-limiter
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 export const pinterestService = {
-  // 1. Obtener métricas específicas de un PIN
-  async fetchPinAnalytics(pinId: string): Promise<any> {
+
+  // 1. OBTENER SOLO LOS PINES 'TOP PERFORMERS'
+  async fetchTopPinsAnalytics(): Promise<RealPinData[]> {
+    console.log("📡 SOLICITANDO INTELIGENCIA (TOP PINS)...");
     const { startDate, endDate } = getDateRange();
-    const url = `${BASE_URL}/pins/${pinId}/analytics?start_date=${startDate}&end_date=${endDate}&metric_types=IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK`;
+    
+    // Sort by IMPRESSION para asegurar que traemos los gigantes primero
+    const url = `${BASE_URL}/user_account/analytics/top_pins?start_date=${startDate}&end_date=${endDate}&sort_by=IMPRESSION&page_size=50&metric_types=IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK`;
 
     try {
-      const response = await fetch(url, {
-        headers: { "Authorization": `Bearer ${getToken()}` }
-      });
-      
-      if (response.status === 429) {
-        console.warn("⚠️ RATE LIMIT ALCANZADO: Pausando...");
-        return null; 
-      }
+      const response = await fetch(url, { headers: { "Authorization": `Bearer ${getToken()}` } });
+      if (!response.ok) return [];
 
-      if (!response.ok) return null;
-      return await response.json();
+      const data = await response.json();
+      const rawList = data.pins || data.items || [];
+
+      // Mapeo blindado
+      return rawList.map((item: any) => ({
+        id: String(item.pin_id || item.id),
+        title: item.title || "Top Performer",
+        link: null, 
+        board_id: "TOP_TIER", 
+        alt_text: null,
+        metrics: {
+            impression_count: Number(item.metrics?.IMPRESSION || item.metrics?.impression_count || 0),
+            save_count: Number(item.metrics?.SAVE || item.metrics?.save_count || 0),
+            pin_click_count: Number(item.metrics?.PIN_CLICK || item.metrics?.pin_click_count || 0),
+            outbound_click_count: Number(item.metrics?.OUTBOUND_CLICK || item.metrics?.outbound_click_count || 0)
+        }
+      }));
+
     } catch (e) {
-      return null;
+      console.error("❌ FALLO EN INTELIGENCIA:", e);
+      return [];
     }
   },
 
-  // 2. Barrido Controlado (SECUENCIAL)
-  async fetchAllPins(): Promise<RealPinData[]> {
-    console.log("📡 INICIANDO EXTRACCIÓN REAL (MODO SEGURO)...");
-    
+  // 2. BARRIDO DE INVENTARIO (Ahora sí lo activamos)
+  async fetchInventoryScan(): Promise<RealPinData[]> {
+    console.log("📡 ESCANEANDO COLA LARGA...");
     let allPins: RealPinData[] = [];
     let bookmark: string | null = null;
     let keepFetching = true;
+    const SAFETY_LIMIT = 100; // Subimos un poco el límite
     let totalProcessed = 0;
-    const SAFETY_LIMIT = 50; // <--- FRENADA DE EMERGENCIA: Solo procesa los primeros 50 pines por ciclo mientras estás en Trial.
 
     try {
       while (keepFetching && totalProcessed < SAFETY_LIMIT) {
-        let url = `${BASE_URL}/pins?page_size=25`; // Página pequeña
+        let url = `${BASE_URL}/pins?page_size=50`; 
         if (bookmark) url += `&bookmark=${bookmark}`;
 
-        const response = await fetch(url, {
-          headers: { "Authorization": `Bearer ${getToken()}` }
-        });
-
-        if (response.status === 401) throw new Error("TOKEN_EXPIRED");
-        if (!response.ok) throw new Error("API Error Lista");
+        const response = await fetch(url, { headers: { "Authorization": `Bearer ${getToken()}` } });
+        if (!response.ok) break;
 
         const data = await response.json();
         const rawItems = data.items || [];
-        const enrichedPins: RealPinData[] = [];
 
-        // BUCLE SECUENCIAL (Lento pero Seguro)
-        for (const item of rawItems) {
-            // Pausa de 300ms entre cada pin para no saturar
-            await delay(300);
+        const basicPins: RealPinData[] = rawItems.map((item: any) => ({
+            id: String(item.id),
+            link: item.link,
+            title: item.title || "Sin Título",
+            alt_text: item.alt_text,
+            board_id: item.board_id,
+            metrics: { impression_count: 0, save_count: 0, pin_click_count: 0, outbound_click_count: 0 }
+        }));
 
-            const analytics = await pinterestService.fetchPinAnalytics(item.id);
-            
-            enrichedPins.push({
-                id: item.id,
-                link: item.link,
-                title: item.title || "Sin Título",
-                alt_text: item.alt_text,
-                board_id: item.board_id,
-                metrics: {
-                    impression_count: analytics?.IMPRESSION || 0,
-                    save_count: analytics?.SAVE || 0,
-                    pin_click_count: analytics?.PIN_CLICK || 0,
-                    outbound_click_count: analytics?.OUTBOUND_CLICK || 0
-                }
-            });
-            
-            // Log visual para ver progreso
-            console.log(`... Pin ${item.id} escaneado. (Stats: ${analytics ? 'OK' : '0'})`);
-        }
-
-        allPins = [...allPins, ...enrichedPins];
+        allPins = [...allPins, ...basicPins];
         totalProcessed += rawItems.length;
-
         bookmark = data.bookmark;
         if (!bookmark) keepFetching = false;
+        
+        await new Promise(r => setTimeout(r, 100)); 
       }
-
-      if (totalProcessed >= SAFETY_LIMIT) {
-          console.log("🛑 LIMITE DE SEGURIDAD ALCANZADO (Trial Mode).");
-      }
-
       return allPins;
-
     } catch (error) {
-      console.error("❌ FALLO:", error);
-      throw error;
+      return [];
     }
+  },
+
+  // 3. FUSIÓN REAL
+  async fetchAllPins(): Promise<RealPinData[]> {
+      const topPins = await this.fetchTopPinsAnalytics();
+      const inventory = await this.fetchInventoryScan();
+
+      const pinMap = new Map<string, RealPinData>();
+
+      // A. Inventario base
+      inventory.forEach(p => pinMap.set(p.id, p));
+
+      // B. Top Pins reales (Sobrescriben con datos ricos)
+      topPins.forEach(tp => {
+          const existing = pinMap.get(tp.id);
+          // Fusión inteligente: Mantiene link/titulo del inventario si existe, pero usa métricas del TopPin
+          pinMap.set(tp.id, { 
+              ...tp, 
+              link: existing?.link || tp.link, 
+              title: existing?.title !== "Sin Título" ? existing?.title || tp.title : tp.title 
+          });
+      });
+
+      const finalArray = Array.from(pinMap.values());
+      console.log(`✅ FUSIÓN COMPLETADA: ${finalArray.length} activos.`);
+      return finalArray;
   }
 };

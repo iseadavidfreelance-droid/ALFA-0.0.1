@@ -1,7 +1,6 @@
 import { Asset, AssetDestination, Mission, LifecycleStage, PinMetrics } from '../types';
-import { RealPinData } from './pinterestService';
+import { RealPinData } from './pinterestService'; 
 
-// --- MOTOR DE INTEGRIDAD: EL CLASIFICADOR ---
 export const runIntegrityCheck = (
   dbAssets: Asset[], 
   realPins: RealPinData[]
@@ -9,18 +8,22 @@ export const runIntegrityCheck = (
   
   const missions: Mission[] = [];
   const mappedPins = new Map<string, PinMetrics[]>(); 
-  const orphans: RealPinData[] = []; // [NUEVO] Aquí guardamos los objetos para la UI
+  const orphans: RealPinData[] = [];
 
-  // 1. Mapa de Identidad
   const registeredPinIds = new Set<string>();
   dbAssets.forEach(asset => {
     if (!mappedPins.has(asset.sku_id)) mappedPins.set(asset.sku_id, []);
     asset.pins.forEach(p => registeredPinIds.add(p.pin_id));
   });
 
-  // 2. Escaneo de Realidad
   realPins.forEach(realPin => {
-    // CASO A: Registrado (Actualizar métricas)
+    const imp = realPin.metrics?.impression_count || 0;
+    const save = realPin.metrics?.save_count || 0;
+    const out = realPin.metrics?.outbound_click_count || 0;
+    const clicks = realPin.metrics?.pin_click_count || 0;
+    
+    const score = Math.floor((imp * 0.05) + (save * 2) + (clicks * 5) + (out * 10));
+
     if (registeredPinIds.has(realPin.id)) {
       const ownerAsset = dbAssets.find(a => a.pins.some(p => p.pin_id === realPin.id));
       if (ownerAsset) {
@@ -28,37 +31,46 @@ export const runIntegrityCheck = (
         currentList.push({
           pin_id: realPin.id,
           url: `https://pinterest.com/pin/${realPin.id}`,
-          impressions: realPin.metrics?.impression_count || 0,
-          clicks: realPin.metrics?.pin_click_count || 0,
-          outbound_clicks: realPin.metrics?.outbound_click_count || 0,
-          saves: realPin.metrics?.save_count || 0,
-          velocity_score: (realPin.metrics?.impression_count || 0) * 0.1 
+          impressions: imp,
+          clicks: clicks,
+          outbound_clicks: out,
+          saves: save,
+          velocity_score: score
         });
         mappedPins.set(ownerAsset.sku_id, currentList);
       }
     } 
-    // CASO B: Huérfano (Materia Prima)
     else {
-      orphans.push(realPin); // Guardamos el objeto real
+      orphans.push(realPin);
       
-      missions.push({
-        id: `ORPHAN-${realPin.id}`,
-        type: 'UNMAPPED_RESOURCE',
-        priority: 'HIGH',
-        asset_sku: 'UNKNOWN',
-        message: `Activo Huérfano: ${realPin.id}`,
-        evidence: [`Título: ${realPin.title || 'N/A'}`, `Board: ${realPin.board_id}`],
-        tasks: ['RECLAMAR EN AUDITORIA'],
-        status: 'OPEN',
-        created_at: Date.now()
-      });
+      // Filtro flexible: Muestra si tiene score > 0 OR es top tier OR es un test
+      const isWorthy = score > 0 || realPin.board_id === 'TOP_TIER' || realPin.id.includes('TEST');
+
+      if (isWorthy) {
+          missions.push({
+            id: `ORPHAN-${realPin.id}`,
+            type: 'UNMAPPED_RESOURCE',
+            priority: score > 100 ? 'HIGH' : 'MEDIUM', 
+            asset_sku: 'UNKNOWN',
+            message: `Activo Detectado: ${realPin.title || realPin.id}`,
+            evidence: [
+                `SCORE:${score}`,
+                `IMP:${imp}`,
+                `SAVE:${save}`,
+                `OUT:${out}`,
+                `Título: ${realPin.title || 'N/A'}`
+            ],
+            tasks: ['RECLAMAR EN AUDITORIA'],
+            status: 'OPEN',
+            created_at: Date.now()
+          });
+      }
     }
   });
 
-  return { missions, mappedPins, orphans }; // Devolvemos orphans a la App
+  return { missions, mappedPins, orphans };
 };
 
-// --- RESTO DE MOTORES (MANTENER IGUAL) ---
 export const runIncubationEngine = (assets: Asset[]): Asset[] => {
   const THRESHOLD_DAYS = 30;
   const now = Date.now();
@@ -83,9 +95,9 @@ export const runLeakHunter = (assets: Asset[], destinations: AssetDestination[])
         type: 'URGENT_LEAK_FIX',
         priority: 'HIGH',
         asset_sku: asset.sku_id,
-        message: `Fuga Crítica: ${totalOutbound} clics sin monetizar.`,
+        message: `Fuga de Tráfico: ${totalOutbound} clics perdidos.`,
         evidence: [`Outbound: ${totalOutbound}`],
-        tasks: [`Crear producto Payhip`, `Vincular nodo`],
+        tasks: [`Vincular link de pago`],
         status: 'OPEN',
         created_at: Date.now()
       });
@@ -94,13 +106,12 @@ export const runLeakHunter = (assets: Asset[], destinations: AssetDestination[])
   return missions;
 };
 
-export const runLinkHealthCheck = (destinations: AssetDestination[]) => {
-    return { updatedDestinations: destinations, missions: [] };
-};
-
-export const calculateAssetScore = (pins: any[]) => {
+export const calculateAssetScore = (pins: any[], revenue: number = 0) => {
   if (!pins) return 0;
-  return pins.reduce((acc, p) => acc + (p.impressions * 0.05) + (p.clicks * 2) + (p.outbound_clicks * 10), 0);
+  const trafficScore = pins.reduce((acc, p) => acc + (p.impressions * 0.05) + (p.clicks * 2) + (p.outbound_clicks * 10), 0);
+  return trafficScore + (revenue * 20);
 };
 
-export const calculateRarityByPercentile = (assets: Asset[]) => assets;
+export const calculateRarityByPercentile = (assets: Asset[], destinations: AssetDestination[]) => {
+  return assets; 
+};

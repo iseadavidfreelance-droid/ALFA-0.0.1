@@ -5,9 +5,6 @@ import {
   Asset, 
   AssetDestination, 
   Mission, 
-  LifecycleStage,
-  SourceStatus,
-  OwnershipType,
   Rarity,
   Artist,
   Transaction,
@@ -32,7 +29,7 @@ import { GoogleGenAI } from "@google/genai";
 import { supabase } from './services/supabaseClient';
 
 const App: React.FC = () => {
-  // ESTADO DB: Ahora inicia vacío, esperando a Supabase
+  // ESTADO DB
   const [assets, setAssets] = useState<Asset[]>([]); 
   const [artists, setArtists] = useState<Artist[]>([]);
   const [destinations, setDestinations] = useState<AssetDestination[]>(INITIAL_DESTINATIONS); 
@@ -43,7 +40,7 @@ const App: React.FC = () => {
   const [globalCredits, setGlobalCredits] = useState(40);
   const [totalYield, setTotalYield] = useState(0);
   
-  // Mantenemos orphans para la ingesta en vivo, pero la UI principal se apoyará en missions para persistencia
+  // Mantenemos orphans para la ingesta en vivo
   const [orphans, setOrphans] = useState<RealPinData[]>([]); 
 
   const [activeTab, setActiveTab] = useState<'PANEL' | 'INVENTARIO' | 'ARTISTAS' | 'FINANZAS' | 'AUDITORIA'>('PANEL');
@@ -53,7 +50,7 @@ const App: React.FC = () => {
   const [isCreateAssetModalOpen, setIsCreateAssetModalOpen] = useState(false);
   const [isCreateArtistModalOpen, setIsCreateArtistModalOpen] = useState(false);
   
-  // [INSERCIÓN 1: ESTADO DE ALERTA DE TOKEN]
+  // ESTADO DE ALERTA DE TOKEN
   const [showTokenModal, setShowTokenModal] = useState(false);
   
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -70,7 +67,7 @@ const App: React.FC = () => {
     setTerminalLog(prev => [...prev.slice(-100), logEntry]);
   };
 
-  // [NUEVO] Listener Global del Sistema de Radio
+  // Listener Global del Sistema de Radio
   useEffect(() => {
     const handleSystemLog = (e: any) => {
       const { message, type } = e.detail;
@@ -146,11 +143,13 @@ const App: React.FC = () => {
           const pinId = newAsset.pins[0].pin_id;
           setOrphans(prev => prev.filter(o => o.id !== pinId));
           const missionId = `ORPHAN-${pinId}`;
-          const mission = missions.find(m => m.id === missionId);
-          if (mission) {
-               await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', mission.id);
-               setMissions(prev => prev.map(m => m.id === mission.id ? {...m, status: 'RESOLVED'} : m));
-          }
+          
+          // ACTUALIZACIÓN ROBUSTA DE MISIONES
+          setMissions(prev => {
+             const updated = prev.map(m => m.id === missionId ? {...m, status: 'RESOLVED' as const} : m);
+             return updated;
+          });
+          await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', missionId);
       }
     }
     setIsCreateAssetModalOpen(false);
@@ -224,12 +223,13 @@ const App: React.FC = () => {
 
       case 'verificar':
         const target = parts[1]?.toUpperCase();
-        setMissions(prev => prev.map(m => m.asset_sku === target ? { ...m, status: 'RESOLVED' } : m));
-        const missionToClose = missions.find(m => m.asset_sku === target && m.status === 'OPEN');
-        if (missionToClose) {
-            await supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', missionToClose.id);
-            log(`<span class="text-green-400">MISION ${missionToClose.id} CERRADA EN BASE DE DATOS.</span>`);
-        }
+        setMissions(prev => {
+            const updated = prev.map(m => m.asset_sku === target ? { ...m, status: 'RESOLVED' as const } : m);
+            // Sync con DB para la misión cerrada
+            const closed = updated.find(m => m.asset_sku === target && m.status === 'RESOLVED');
+            if(closed) supabase.from('missions').update({ status: 'RESOLVED' }).eq('id', closed.id).then();
+            return updated;
+        });
         log(`<span class="text-green-400">SKU ${target} VALIDADO EXITOSAMENTE.</span>`);
         break;
 
@@ -237,7 +237,6 @@ const App: React.FC = () => {
         const sku = parts[1]?.toUpperCase();
         log(`<span class="text-purple-400">IA_KERNEL ANALIZANDO SKU ${sku}...</span>`);
         try {
-          // Usa la variable de entorno de Vite
           const apiKey = process.env.GEMINI_API_KEY; 
           if (!apiKey) throw new Error("API Key no configurada");
           
@@ -261,24 +260,23 @@ const App: React.FC = () => {
 
   const runDailyCycle = useCallback(async () => {
     try {
-        // 1. Logs de inicio (Sistema de Radio ya emite logs desde servicios)
-        
-        // 2. Obtener Datos Reales de Pinterest
+        log(`<span class="text-blue-400">INICIANDO CICLO DIARIO...</span>`);
+
+        // 1. Obtener Datos Reales de Pinterest
         const realPins = await pinterestService.fetchAllPins();
         
-        // 3. Ejecutar Motor de Integridad
+        // 2. Ejecutar Motor de Integridad
         const integrityResult = runIntegrityCheck(assets, realPins);
         
-        // Actualizar Orphans UI inmediatamente
         setOrphans(integrityResult.orphans);
 
-        // 4. Actualizar Assets con métricas reales
+        // 3. Actualizar Assets con métricas reales
         let processedAssets = assets.map(a => {
             const newMetrics = integrityResult.mappedPins.get(a.sku_id);
             return newMetrics ? { ...a, pins: newMetrics } : a;
         });
 
-        // 5. Persistencia de Misiones (Integridad)
+        // 4. Persistencia de Misiones (Integridad)
         const newMissions = integrityResult.missions;
         if (newMissions.length > 0) {
             const { error } = await supabase.from('missions').upsert(newMissions);
@@ -288,40 +286,53 @@ const App: React.FC = () => {
             log(`<span class="text-green-500">INTEGRIDAD DE RED: 100% (Sin nuevos huérfanos).</span>`);
         }
 
-        // 6. Motores Lógicos (Incubación -> Rareza -> Fugas)
+        // 5. Motores Lógicos
         const maturedAssets = runIncubationEngine(processedAssets);
         const finalAssets = calculateRarityByPercentile(maturedAssets, destinations);
         const leakMissions = runLeakHunter(finalAssets, destinations);
 
-        // 7. Persistencia de Fugas
         if (leakMissions.length > 0) {
              await supabase.from('missions').upsert(leakMissions);
         }
 
-        // 8. [SNAPSHOTS] Historial de Métricas (La Memoria)
-        const timestamp = Date.now();
-        const snapshots = finalAssets.map(a => {
-            const revenue = destinations.find(d => d.asset_sku === a.sku_id)?.revenue_generated || 0;
-            return {
-                snapshot_id: `SNAP-${timestamp}-${a.sku_id}`,
-                asset_sku: a.sku_id,
-                timestamp: timestamp,
-                total_score: calculateAssetScore(a.pins, revenue),
-                total_revenue: revenue,
-                rarity_at_moment: a.current_rarity
-            };
-        });
-        
-        // TODO: Descomentar cuando exista la tabla 'metrics_history'
-        // await supabase.from('metrics_history').insert(snapshots); 
-        log(`<span class="text-yellow-500">HISTORIAL: ${snapshots.length} puntos de datos procesados.</span>`);
+        // 6. [SNAPSHOTS] Historial de Métricas
+        const timestampISO = new Date().toISOString(); 
+        const snapshots: any[] = []; 
 
-        // 9. Actualización de Estado Final
+        finalAssets.forEach(asset => {
+            asset.pins.forEach(pin => {
+                snapshots.push({
+                    asset_sku: asset.sku_id,
+                    pin_id: pin.pin_id,
+                    recorded_at: timestampISO,
+                    impressions: pin.impressions,
+                    saves: pin.saves,
+                    clicks: pin.clicks,
+                    outbound_clicks: pin.outbound_clicks
+                });
+            });
+        });
+
+        if (snapshots.length > 0) {
+           const { error: snapError } = await supabase.from('pin_snapshots').insert(snapshots);
+           if (snapError) console.error("Error guardando historial:", snapError);
+           log(`<span class="text-yellow-500">HISTORIAL: ${snapshots.length} registros guardados en DB.</span>`);
+        }
+
+        // 7. ACTUALIZACIÓN DE ESTADO FINAL (CORREGIDA PARA SOBRESCRIBIR)
         setAssets(finalAssets);
+        
+        // ⚠️ CORRECCIÓN CLAVE: Usamos un Mapa para asegurar que las misiones NUEVAS
+        // con datos actualizados (SCORE, etc.) sobrescriban a las viejas en memoria.
         setMissions(prev => {
-            const currentIds = new Set(prev.map(m => m.id));
-            const uniqueNew = [...newMissions, ...leakMissions].filter(m => !currentIds.has(m.id));
-            return [...prev, ...uniqueNew];
+            const missionMap = new Map(prev.map(m => [m.id, m]));
+            
+            // Inyectamos las nuevas (Integridad + Fugas) sobre las viejas
+            [...newMissions, ...leakMissions].forEach(m => {
+                missionMap.set(m.id, m);
+            });
+            
+            return Array.from(missionMap.values());
         });
 
         log(`<span class="text-green-500 font-bold">[OK] SINCRONIZACIÓN COMPLETADA. TABLERO ACTUALIZADO.</span>`);
@@ -362,16 +373,19 @@ const App: React.FC = () => {
 
   const selectedAsset = useMemo(() => assets.find(a => a.sku_id === selectedAssetSku) || null, [assets, selectedAssetSku]);
 
-  // LISTA DE AUDITORÍA PERSISTENTE
+  // LISTA DE AUDITORÍA (Ordenada por SCORE real extraído del texto)
   const auditOrphanList = useMemo(() => {
-      // Usamos 'missions' que vienen de DB, no 'orphans' volátil
       return missions
         .filter(m => m.type === 'UNMAPPED_RESOURCE' && m.status === 'OPEN')
-        // Ordenar por prioridad (HIGH antes que MEDIUM)
-        .sort((a,b) => (a.priority === 'HIGH' ? -1 : 1));
+        .sort((a,b) => {
+            const getScore = (m: Mission) => {
+                const line = m.evidence.find(s => s.startsWith('SCORE:'));
+                return line ? parseInt(line.split(':')[1]) : 0;
+            };
+            return getScore(b) - getScore(a); // Mayor score arriba
+        });
   }, [missions]);
 
-  // HELPER PARA PARSEAR EVIDENCIA DE DB
   const parseEvidence = (evidence: string[]) => {
       const stats = { imp: 0, save: 0, out: 0, score: 0 };
       if (!evidence) return stats;
@@ -456,6 +470,73 @@ const App: React.FC = () => {
             </div>
           )}
           
+          {activeTab === 'AUDITORIA' && (
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
+               <div className="border-b-2 border-red-600/40 pb-6 mb-4">
+                 <h2 className="text-3xl font-black text-red-500 uppercase italic tracking-tighter leading-none">Salud_del_Kernel_Integridad</h2>
+                 <p className="text-[10px] opacity-40 uppercase tracking-widest mt-2 font-bold font-mono tracking-[0.4em]">Audit_Scan_Mode: DEEP // Panóptico Expandido</p>
+               </div>
+               
+               <div className="bg-red-900/5 border border-red-600/50 p-0 flex flex-col h-[500px]">
+                  <div className="flex justify-between items-center p-4 bg-red-900/20 border-b border-red-600/30">
+                      <h3 className="text-sm font-black text-red-500 uppercase">Cola de Procesamiento de Huérfanos</h3>
+                      <div className="text-[10px] font-mono text-red-400">{auditOrphanList.length} EVENTOS PENDIENTES</div>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto custom-scrollbar">
+                      <table className="w-full text-left text-[10px] uppercase font-mono">
+                          <thead className="bg-black sticky top-0 text-red-600/60 font-black">
+                              <tr>
+                                  <th className="p-3 border-b border-red-900/30">ID PIN</th>
+                                  <th className="p-3 border-b border-red-900/30">MÉTRICAS CAPTURADAS (DB)</th>
+                                  <th className="p-3 border-b border-red-900/30 text-right">ACCIÓN</th>
+                              </tr>
+                          </thead>
+                          <tbody className="divide-y divide-red-900/20">
+                              {auditOrphanList.length === 0 ? (
+                                  <tr><td colSpan={3} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
+                              ) : (
+                                  auditOrphanList.map(m => {
+                                      const stats = parseEvidence(m.evidence);
+                                      const pinId = m.id.replace('ORPHAN-', '');
+
+                                      return (
+                                        <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
+                                            <td className="p-3 text-red-400 font-bold">{pinId}</td>
+                                            <td className="p-3">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                   <span className="text-yellow-500 font-black text-xs">SCORE: {stats.score}</span>
+                                                   <span className="text-[9px] text-white opacity-50">{m.message}</span>
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-2 text-[9px] opacity-70 font-mono">
+                                                   <div><span className="text-red-400">IMP:</span> {stats.imp}</div>
+                                                   <div><span className="text-blue-400">SAVE:</span> {stats.save}</div>
+                                                   <div><span className="text-green-400">OUT:</span> {stats.out}</div>
+                                                </div>
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                <button 
+                                                    onClick={() => {
+                                                        navigator.clipboard.writeText(pinId); 
+                                                        setIsCreateAssetModalOpen(true);
+                                                    }}
+                                                    className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]"
+                                                >
+                                                    RECLAMAR
+                                                </button>
+                                            </td>
+                                        </tr>
+                                      );
+                                  })
+                              )}
+                          </tbody>
+                      </table>
+                  </div>
+               </div>
+             </div>
+          )}
+          
+          {/* ... (Resto de pestañas ARTISTAS y FINANZAS se mantienen igual) ... */}
           {activeTab === 'ARTISTAS' && (
              <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
                <div className="flex justify-between items-center border-b border-purple-500/20 pb-4">
@@ -527,74 +608,6 @@ const App: React.FC = () => {
                          ))}
                        </tbody>
                      </table>
-                  </div>
-               </div>
-             </div>
-          )}
-
-          {activeTab === 'AUDITORIA' && (
-             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
-               <div className="border-b-2 border-red-600/40 pb-6 mb-4">
-                 <h2 className="text-3xl font-black text-red-500 uppercase italic tracking-tighter leading-none">Salud_del_Kernel_Integridad</h2>
-                 <p className="text-[10px] opacity-40 uppercase tracking-widest mt-2 font-bold font-mono tracking-[0.4em]">Audit_Scan_Mode: DEEP // Panóptico Expandido</p>
-               </div>
-               
-               {/* TABLA DE AUDITORÍA CONECTADA A DB (Missions) */}
-               <div className="bg-red-900/5 border border-red-600/50 p-0 flex flex-col h-[500px]">
-                  <div className="flex justify-between items-center p-4 bg-red-900/20 border-b border-red-600/30">
-                      <h3 className="text-sm font-black text-red-500 uppercase">Cola de Procesamiento de Huérfanos</h3>
-                      <div className="text-[10px] font-mono text-red-400">{auditOrphanList.length} EVENTOS PENDIENTES</div>
-                  </div>
-                  
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                      <table className="w-full text-left text-[10px] uppercase font-mono">
-                          <thead className="bg-black sticky top-0 text-red-600/60 font-black">
-                              <tr>
-                                  <th className="p-3 border-b border-red-900/30">ID PIN</th>
-                                  <th className="p-3 border-b border-red-900/30">MÉTRICAS CAPTURADAS (DB)</th>
-                                  <th className="p-3 border-b border-red-900/30 text-right">ACCIÓN</th>
-                              </tr>
-                          </thead>
-                          <tbody className="divide-y divide-red-900/20">
-                              {auditOrphanList.length === 0 ? (
-                                  <tr><td colSpan={3} className="p-10 text-center text-red-500/30 italic">SIN ANOMALÍAS REGISTRADAS. EJECUTE 'CICLO'.</td></tr>
-                              ) : (
-                                  auditOrphanList.map(m => {
-                                      // Recuperamos las métricas del texto guardado en DB
-                                      const stats = parseEvidence(m.evidence);
-                                      const pinId = m.id.replace('ORPHAN-', '');
-
-                                      return (
-                                        <tr key={m.id} className="hover:bg-red-500/10 transition-colors group">
-                                            <td className="p-3 text-red-400 font-bold">{pinId}</td>
-                                            <td className="p-3">
-                                                <div className="flex items-center gap-2 mb-1">
-                                                   <span className="text-yellow-500 font-black text-xs">SCORE: {stats.score}</span>
-                                                   <span className="text-[9px] text-white opacity-50">{m.message}</span>
-                                                </div>
-                                                <div className="grid grid-cols-3 gap-2 text-[9px] opacity-70 font-mono">
-                                                   <div><span className="text-red-400">IMP:</span> {stats.imp}</div>
-                                                   <div><span className="text-blue-400">SAVE:</span> {stats.save}</div>
-                                                   <div><span className="text-green-400">OUT:</span> {stats.out}</div>
-                                                </div>
-                                            </td>
-                                            <td className="p-3 text-right">
-                                                <button 
-                                                    onClick={() => {
-                                                        navigator.clipboard.writeText(pinId); 
-                                                        setIsCreateAssetModalOpen(true);
-                                                    }}
-                                                    className="border border-red-500 text-red-500 px-4 py-2 font-black text-[9px] hover:bg-red-600 hover:text-white transition-all shadow-[0_0_10px_rgba(220,38,38,0.2)]"
-                                                >
-                                                    RECLAMAR
-                                                </button>
-                                            </td>
-                                        </tr>
-                                      );
-                                  })
-                              )}
-                          </tbody>
-                      </table>
                   </div>
                </div>
              </div>
