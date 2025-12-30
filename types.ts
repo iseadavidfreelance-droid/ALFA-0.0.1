@@ -72,7 +72,7 @@ export interface Mission {
   evidence: string[];
   tasks: string[];
   status: 'OPEN' | 'RESOLVED';
-  created_at: number; // <--- ¡AQUÍ ESTABA EL FALTANTE!
+  created_at: number; 
 }
 
 export interface Artist {
