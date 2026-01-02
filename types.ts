@@ -1,3 +1,4 @@
+
 export enum SourceStatus {
   RAW = 'RAW',
   EXPORTED = 'EXPORTED',
@@ -72,7 +73,6 @@ export interface Mission {
   evidence: string[];
   tasks: string[];
   status: 'OPEN' | 'RESOLVED';
-  created_at: number; 
 }
 
 export interface Artist {

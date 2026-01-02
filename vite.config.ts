@@ -8,14 +8,6 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
-        proxy: {
-          '/api-pinterest': {
-            target: 'https://api.pinterest.com', // O 'https://api-sandbox.pinterest.com' si usas sandbox
-            changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/api-pinterest/, ''),
-            secure: false,
-          }
-        }
       },
       plugins: [react()],
       define: {
