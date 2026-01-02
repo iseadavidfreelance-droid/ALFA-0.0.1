@@ -6,17 +6,16 @@ import {
   Mission, 
   LifecycleStage,
   SourceStatus,
-  OwnershipType,
   Rarity,
   Artist,
   Transaction,
-  MarketTier
+  MarketTier,
+  PinMetrics
 } from './types';
 import { 
   INITIAL_ASSETS, 
   INITIAL_DESTINATIONS, 
   INITIAL_ARTISTS,
-  COMMAND_HELP 
 } from './constants';
 import { 
   calculateRarityByPercentile, 
@@ -25,6 +24,12 @@ import {
   runLinkHealthCheck,
   calculateAssetScore
 } from './services/logicEngines';
+import {
+  fetchUserPins,
+  fetchPinAnalytics,
+  transformToPinMetrics,
+  PinterestPin
+} from './services/pinterestAPI';
 import CLI from './components/CLI';
 import MissionBoard from './components/MissionBoard';
 import AssetDetailModal from './components/AssetDetailModal';
@@ -41,26 +46,81 @@ const App: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [globalCredits, setGlobalCredits] = useState(40);
   const [totalYield, setTotalYield] = useState(() => INITIAL_DESTINATIONS.reduce((a,b) => a + b.revenue_generated, 0));
+  const [rawPins, setRawPins] = useState<PinterestPin[]>([]);
   
   // UI State
-  const [activeTab, setActiveTab] = useState<'PANEL' | 'INVENTARIO' | 'ARTISTAS' | 'FINANZAS' | 'AUDITORIA'>('PANEL');
+  const [activeTab, setActiveTab] = useState<'PANEL' | 'PINTEREST' |'INVENTARIO' | 'ARTISTAS' | 'FINANZAS' | 'AUDITORIA'>('PANEL');
   const [selectedAssetSku, setSelectedAssetSku] = useState<string | null>(null);
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [isSyncing, setIsSyncing] = useState(false);
   
   // Filters for Archive
   const [invSearch, setInvSearch] = useState('');
   const [invSort, setInvSort] = useState<'SCORE' | 'OUTBOUND' | 'YIELD'>('SCORE');
   const [invRarityFilter, setInvRarityFilter] = useState<string>('ALL');
 
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
   const log = (msg: string) => setTerminalLog(prev => [...prev.slice(-100), msg]);
   const [terminalLog, setTerminalLog] = useState<string[]>(['ALFA_OS v0.0.1 SYSTEM_READY', 'KERNEL_LINK_ACTIVE']);
+
+  const syncPinterest = useCallback(async () => {
+    if (isSyncing) {
+      log('<span class="text-yellow-500">SYNC_ERROR: Sincronización ya en progreso.</span>');
+      return;
+    }
+    setIsSyncing(true);
+    log('<span class="text-cyan-400 font-bold">[PINTEREST_SYNC] INICIANDO CONEXIÓN CON API v5...</span>');
+    try {
+      log('<span class="text-cyan-400">[PINTEREST_SYNC] OBTENIENDO PINES DEL USUARIO...</span>');
+      const fetchedPins = await fetchUserPins();
+      setRawPins(fetchedPins);
+      log(`<span class="text-cyan-400">[PINTEREST_SYNC] ÉXITO: ${fetchedPins.length} PINES ENCONTRADOS.</span>`);
+      
+      log(`<span class="text-cyan-400">[PINTEREST_SYNC] OBTENIENDO ANALYTICS PARA ${fetchedPins.length} PINES...</span>`);
+      const pinIds = fetchedPins.map(p => p.id);
+      const analytics = await fetchPinAnalytics(pinIds);
+      const analyticsMap = new Map(analytics.map(a => [a.pin_id, a]));
+      
+      log('<span class="text-cyan-400">[PINTEREST_SYNC] PROCESANDO Y MAPEANDO DATOS A SKUs...</span>');
+      
+      const updatedAssets = [...assets];
+      const skuRegex = /\[(SKU-\d+)\]/i;
+      let mappedPinsCount = 0;
+
+      // Limpiar pines existentes para evitar duplicados
+      updatedAssets.forEach(asset => asset.pins = []);
+
+      fetchedPins.forEach(pin => {
+        const match = pin.title.match(skuRegex);
+        if (match) {
+          const sku = match[1].toUpperCase();
+          const targetAsset = updatedAssets.find(a => a.sku_id === sku);
+          const pinAnalytics = analyticsMap.get(pin.id);
+
+          if (targetAsset && pinAnalytics) {
+            const newPinMetrics = transformToPinMetrics(pin, pinAnalytics);
+            targetAsset.pins.push(newPinMetrics);
+            mappedPinsCount++;
+          }
+        }
+      });
+      
+      setAssets(calculateRarityByPercentile(updatedAssets));
+      log(`<span class="text-cyan-400 font-bold">[PINTEREST_SYNC] SINCRONIZACIÓN COMPLETA. ${mappedPinsCount} PINES MAPEADOS.</span>`);
+
+    } catch (error) {
+      log(`<span class="text-red-500">PINTEREST_SYNC_FAILURE: ${error.message}</span>`);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [assets, isSyncing]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    syncPinterest(); // Sync on initial load
+    return () => clearInterval(timer);
+  }, []); // Empty dependency array ensures this runs only once on mount
 
   const executeCommand = async (rawCmd: string) => {
     const cleanCmd = rawCmd.trim();
@@ -68,10 +128,15 @@ const App: React.FC = () => {
     log(`<span class="text-[#00ff41] opacity-40">$ ${cleanCmd}</span>`);
     const parts = cleanCmd.split(' ');
     const verb = parts[0].toLowerCase();
+    const args = parts.slice(1);
 
     switch (verb) {
+      case 'sync':
+        if(args[0]?.toLowerCase() === 'pinterest') await syncPinterest();
+        else log('SYNC_ERROR: Objetivo no válido. Pruebe "sync pinterest".');
+        break;
       case 'abonar':
-        const usd = parseFloat(parts[1]);
+        const usd = parseFloat(args[0]);
         if (!isNaN(usd)) {
           const creds = Math.floor(usd / 2);
           setGlobalCredits(p => p + creds);
@@ -81,7 +146,7 @@ const App: React.FC = () => {
         }
         break;
       case 'consumir':
-        const n = parseInt(parts[1]);
+        const n = parseInt(args[0]);
         if (!isNaN(n)) {
           setGlobalCredits(p => Math.max(0, p - n));
           setTransactions(p => [...p, { trans_id: `TX-${Date.now()}`, amount: 0, source_type: 'CREDIT_CONSUMPTION', related_id: 'ENTREGA', date: Date.now(), credits_delta: -n }]);
@@ -89,12 +154,12 @@ const App: React.FC = () => {
         }
         break;
       case 'verificar':
-        const target = parts[1]?.toUpperCase();
+        const target = args[0]?.toUpperCase();
         setMissions(prev => prev.map(m => m.asset_sku === target ? { ...m, status: 'RESOLVED' } : m));
         log(`<span class="text-green-400">SKU ${target} VALIDADO EXITOSAMENTE.</span>`);
         break;
       case 'analizar':
-        const sku = parts[1]?.toUpperCase();
+        const sku = args[0]?.toUpperCase();
         log(`<span class="text-purple-400">IA_KERNEL ANALIZANDO SKU ${sku}...</span>`);
         try {
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -114,29 +179,14 @@ const App: React.FC = () => {
   };
 
   const runDailyCycle = useCallback(() => {
-    log(`<span class="text-yellow-500 font-bold">[CICLO] SINCRO GLOBAL EN PROCESO...</span>`);
-    setAssets(prev => prev.map(a => ({
-      ...a,
-      pins: a.pins.map(p => {
-        const newImp = p.impressions + Math.floor(Math.random() * 500);
-        const newClks = p.clicks + Math.floor(Math.random() * 20);
-        const newOut = p.outbound_clicks + Math.floor(Math.random() * 5);
-        return {
-          ...p,
-          impressions: newImp,
-          clicks: newClks,
-          outbound_clicks: newOut,
-          velocity_score: (newImp * 0.05) + (newClks * 2) + (newOut * 10)
-        };
-      })
-    })));
-
+    log(`<span class="text-yellow-500 font-bold">[CICLO] INICIANDO CICLO DE ANÁLISIS DIARIO...</span>`);
+    // NOTE: Pin metric simulation is removed. We now operate on synced data.
     const { updatedDestinations, missions: heartbeatMissions } = runLinkHealthCheck(destinations);
     setDestinations(updatedDestinations);
     
     setAssets(prev => {
       const matured = runIncubationEngine(prev);
-      return calculateRarityByPercentile(matured);
+      return calculateRarityByPercentile(matured); // Rarity is recalculated based on latest stats
     });
 
     const leakMissions = runLeakHunter(assets, destinations);
@@ -146,7 +196,7 @@ const App: React.FC = () => {
       return [...prev, ...allNew.filter(m => !existingIds.has(m.id))];
     });
 
-    log(`<span class="text-green-500 font-bold">[OK] CICLO FINALIZADO.</span>`);
+    log(`<span class="text-green-500 font-bold">[OK] CICLO COMPLETADO.</span>`);
   }, [assets, destinations]);
 
   const filteredInventory = useMemo(() => {
@@ -158,7 +208,6 @@ const App: React.FC = () => {
     if (invRarityFilter !== 'ALL') {
       list = list.filter(a => a.current_rarity === invRarityFilter);
     }
-    
     list.sort((a, b) => {
       if (invSort === 'SCORE') return calculateAssetScore(b.pins) - calculateAssetScore(a.pins);
       if (invSort === 'YIELD') {
@@ -178,7 +227,6 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#050505] text-[#00ff41] font-mono flex flex-col p-4 gap-4 crt-flicker selection:bg-[#00ff41] selection:text-black">
       
-      {/* HEADER PANÓPTICO */}
       <header className="flex flex-col md:flex-row justify-between items-center border-b border-[#00ff41]/40 bg-[#00ff41]/5 p-4 gap-4 relative overflow-hidden">
         <div className="flex gap-8 items-center">
           <div className="flex flex-col">
@@ -195,7 +243,7 @@ const App: React.FC = () => {
         </div>
 
         <nav className="flex gap-1 bg-black/60 p-1 border border-[#00ff41]/20">
-          {(['PANEL', 'INVENTARIO', 'ARTISTAS', 'FINANZAS', 'AUDITORIA'] as const).map(tab => (
+          {(['PANEL', 'PINTEREST', 'INVENTARIO', 'ARTISTAS', 'FINANZAS', 'AUDITORIA'] as const).map(tab => (
             <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-1 text-[9px] font-black border ${activeTab === tab ? 'bg-[#00ff41] text-black border-[#00ff41]' : 'border-transparent opacity-40'} uppercase transition-all`}>
               {tab}
             </button>
@@ -207,12 +255,11 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* VIEWPORT */}
       <main className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 overflow-hidden">
         <section className="lg:col-span-9 flex flex-col border border-[#00ff41]/20 bg-black/40 overflow-hidden relative">
           
           {activeTab === 'PANEL' && (
-            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10 animate-in fade-in">
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10 animate-in fade-in">
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-10">
                 <div className="space-y-4">
                   <h3 className="text-xs font-black uppercase italic border-l-4 border-[#00ff41] pl-3 py-1 bg-[#00ff41]/5">Vectores_Elite_Assets</h3>
@@ -252,8 +299,30 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {activeTab === 'INVENTARIO' && (
+          {activeTab === 'PINTEREST' && (
             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
+              <div className="flex justify-between items-center border-b border-pink-500/20 pb-4">
+                <h2 className="text-xl font-black uppercase italic tracking-tighter text-pink-400">RAW_PINS_SYNC</h2>
+                <button onClick={syncPinterest} disabled={isSyncing} className="bg-pink-600 text-white text-[9px] font-black px-4 py-1 uppercase italic disabled:opacity-50 disabled:animate-pulse">
+                  {isSyncing ? 'SINCRONIZANDO...' : 'FORZAR_SYNC'}
+                </button>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {rawPins.map(pin => (
+                  <div key={pin.id} className="bg-black border border-white/10 group overflow-hidden">
+                    <img src={pin.media.image_cover_url} alt={pin.title} className="w-full h-48 object-cover group-hover:scale-105 transition-transform" />
+                    <div className="p-3 text-[10px]">
+                      <a href={pin.link} target="_blank" rel="noopener noreferrer" className="font-bold text-pink-400 hover:underline truncate block">{pin.title}</a>
+                      <p className="opacity-50 truncate">{pin.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'INVENTARIO' && (
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-6">
               <div className="flex justify-between items-center border-b border-[#00ff41]/20 pb-4">
                  <h2 className="text-xl font-black uppercase italic tracking-tighter">Archivo_Maestro_Archivo_Digital</h2>
                  <div className="flex gap-2">
@@ -321,7 +390,7 @@ const App: React.FC = () => {
           )}
 
           {activeTab === 'FINANZAS' && (
-            <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
+             <div className="p-6 h-full overflow-y-auto custom-scrollbar flex flex-col gap-10">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-[#00ff41]/20 pb-6 gap-6">
                 <div>
                   <h2 className="text-3xl font-black uppercase italic tracking-tighter leading-none">Ledger_Global_ERP_Capital</h2>
@@ -448,7 +517,6 @@ const App: React.FC = () => {
         </aside>
       </main>
 
-      {/* OVERLAYS */}
       {selectedAsset && (
         <AssetDetailModal 
           asset={selectedAsset} 
